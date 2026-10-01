@@ -11,8 +11,9 @@ const (
 	agentBeadMissing agentBeadPresence = iota
 	agentBeadPresent
 	// agentBeadTownOnly marks a rig-scoped agent bead (witness, refinery,
-	// crew) that exists only in the town database. Patrol state commands
-	// refuse such beads, so it is reported as misplaced (gs-ftg, hq-ou3).
+	// crew, polecat) that exists only in the town database. Rig listings and
+	// patrol state commands do not see such beads, so it is reported as
+	// misplaced (gs-ftg, gs-8hj, hq-ou3).
 	agentBeadTownOnly
 )
 
@@ -62,9 +63,9 @@ func loadAgentBeadsInto(bd *beads.Beads, issues map[string]*beads.Issue, wisps m
 // issues-table record used for label validation; it is nil for wisp-only or
 // missing beads.
 //
-// Rig-scoped beads only count as present when found in a rig database; a
-// copy found only in town is agentBeadTownOnly. Other agent beads (town roles,
-// polecats) count as present in either database.
+// Rig-scoped beads (including polecats) only count as present when found in a
+// rig database; a copy found only in town is agentBeadTownOnly. Town roles
+// count as present in either database.
 func (inv *agentBeadInventory) lookup(id string) (agentBeadPresence, *beads.Issue) {
 	if issue, ok := inv.rigIssues[id]; ok {
 		return agentBeadPresent, issue
@@ -81,4 +82,19 @@ func (inv *agentBeadInventory) lookup(id string) (agentBeadPresence, *beads.Issu
 		return agentBeadTownOnly, townIssue
 	}
 	return agentBeadPresent, townIssue
+}
+
+// hasTownShadow reports whether rig-scoped agent bead id has a rig-local copy
+// and also a live legacy copy in the town database. The rig-local copy is
+// canonical, so the town copy is stale shadow state.
+func (inv *agentBeadInventory) hasTownShadow(id string) bool {
+	if !beads.IsRigLocalAgentBeadID(id) {
+		return false
+	}
+	_, inRigIssues := inv.rigIssues[id]
+	if !inRigIssues && !inv.rigWisps[id] {
+		return false
+	}
+	_, inTownIssues := inv.townIssues[id]
+	return inTownIssues || inv.townWisps[id]
 }

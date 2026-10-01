@@ -16,6 +16,8 @@ func TestAgentBeadInventoryLookup(t *testing.T) {
 	inv.townIssues["gs-gastown-witness"] = &beads.Issue{ID: "gs-gastown-witness"}
 	inv.townWisps["gs-gastown-crew-max"] = true
 	inv.townIssues["gs-gastown-polecat-rust"] = &beads.Issue{ID: "gs-gastown-polecat-rust"}
+	inv.townIssues["gs-gastown-polecat-fury"] = &beads.Issue{ID: "gs-gastown-polecat-fury"}
+	inv.rigIssues["gs-gastown-polecat-fury"] = &beads.Issue{ID: "gs-gastown-polecat-fury", Labels: []string{"gt:agent"}}
 	inv.townIssues["hq-mayor"] = &beads.Issue{ID: "hq-mayor"}
 	inv.townIssues["gs-gastown-refinery"] = &beads.Issue{ID: "gs-gastown-refinery"}
 	inv.rigIssues["gs-gastown-refinery"] = &beads.Issue{ID: "gs-gastown-refinery", Labels: []string{"gt:agent"}}
@@ -25,11 +27,12 @@ func TestAgentBeadInventoryLookup(t *testing.T) {
 		want      agentBeadPresence
 		wantIssue bool
 	}{
-		{"gs-gastown-witness", agentBeadTownOnly, true},     // rig-scoped, town copy only
-		{"gs-gastown-crew-max", agentBeadTownOnly, false},   // rig-scoped, town wisp only
-		{"gs-gastown-refinery", agentBeadPresent, true},     // duplicate: rig copy wins
-		{"gs-gastown-polecat-rust", agentBeadPresent, true}, // polecats are town-owned
-		{"hq-mayor", agentBeadPresent, true},                // town role stays in hq
+		{"gs-gastown-witness", agentBeadTownOnly, true},      // rig-scoped, town copy only
+		{"gs-gastown-crew-max", agentBeadTownOnly, false},    // rig-scoped, town wisp only
+		{"gs-gastown-refinery", agentBeadPresent, true},      // duplicate: rig copy wins
+		{"gs-gastown-polecat-rust", agentBeadTownOnly, true}, // polecats are rig-local (gs-8hj)
+		{"gs-gastown-polecat-fury", agentBeadPresent, true},  // duplicate: rig copy wins
+		{"hq-mayor", agentBeadPresent, true},                 // town role stays in hq
 		{"gs-gastown-crew-nobody", agentBeadMissing, false},
 	}
 	for _, tt := range tests {
@@ -41,11 +44,23 @@ func TestAgentBeadInventoryLookup(t *testing.T) {
 	if _, issue := inv.lookup("gs-gastown-refinery"); !beads.HasLabel(issue, "gt:agent") {
 		t.Errorf("lookup returned the town duplicate instead of the rig-local refinery bead")
 	}
+
+	for id, want := range map[string]bool{
+		"gs-gastown-refinery":     true,  // rig copy + town duplicate
+		"gs-gastown-polecat-fury": true,  // rig copy + town duplicate
+		"gs-gastown-witness":      false, // town-only: misplaced, not shadowed
+		"gs-gastown-polecat-rust": false, // town-only
+		"hq-mayor":                false, // town role
+	} {
+		if got := inv.hasTownShadow(id); got != want {
+			t.Errorf("hasTownShadow(%q) = %v, want %v", id, got, want)
+		}
+	}
 }
 
 func TestAgentBeadsCheckResult_MisplacedIsFixableWarning(t *testing.T) {
 	c := NewAgentBeadsCheck()
-	res := c.result(4, nil, []string{"gs-gastown-witness"}, nil)
+	res := c.result(4, nil, []string{"gs-gastown-witness"}, nil, nil)
 	if res.Status != StatusWarning {
 		t.Fatalf("status = %v, want warning", res.Status)
 	}
@@ -53,17 +68,21 @@ func TestAgentBeadsCheckResult_MisplacedIsFixableWarning(t *testing.T) {
 		t.Fatalf("result = %+v, want misplaced witness diagnostic", res)
 	}
 
-	if res := c.result(4, []string{"gs-gastown-refinery"}, []string{"gs-gastown-witness"}, nil); res.Status != StatusError {
+	if res := c.result(4, []string{"gs-gastown-refinery"}, []string{"gs-gastown-witness"}, nil, nil); res.Status != StatusError {
 		t.Fatalf("missing bead status = %v, want error", res.Status)
 	}
-	if res := c.result(4, nil, nil, nil); res.Status != StatusOK {
+	if res := c.result(4, nil, nil, nil, nil); res.Status != StatusOK {
 		t.Fatalf("clean status = %v, want OK", res.Status)
+	}
+	res = c.result(4, nil, nil, []string{"gs-gastown-polecat-fury"}, nil)
+	if res.Status != StatusWarning || !strings.Contains(res.Message, "stale town duplicate") || len(res.Details) != 1 || !strings.Contains(res.Details[0], "gs-gastown-polecat-fury") {
+		t.Fatalf("shadowed result = %+v, want stale town duplicate warning", res)
 	}
 }
 
-// townOnlyAgentTown builds a town whose witness and refinery beads exist only
-// in the town database (the hq-ou3 state after daemon restart), plus a
-// polecat bead that legitimately lives in town.
+// townOnlyAgentTown builds a town whose witness, refinery, and polecat rust
+// beads exist only in the town database (the hq-ou3 / gs-8hj legacy state),
+// and whose polecat fury has a rig-local bead plus a stale town duplicate.
 func townOnlyAgentTown(t *testing.T) (townRoot, rigBeads, logFile string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -78,6 +97,7 @@ func townOnlyAgentTown(t *testing.T) (townRoot, rigBeads, logFile string) {
 		townBeads,
 		rigBeads,
 		filepath.Join(townRoot, "gastown", "polecats", "rust", ".git"),
+		filepath.Join(townRoot, "gastown", "polecats", "fury", ".git"),
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
@@ -96,16 +116,22 @@ func townOnlyAgentTown(t *testing.T) (townRoot, rigBeads, logFile string) {
 		}
 	}
 
-	agent := func(id, role, state string) string {
-		return fmt.Sprintf(`{"id":"%s","title":"%s title","issue_type":"task","status":"open","labels":["gt:agent"],"description":"%s title\n\nrole_type: %s\nrig: gastown\nagent_state: %s"}`, id, id, id, role, state)
+	agent := func(id, role, state string, labels ...string) string {
+		labelJSON := `"gt:agent"`
+		for _, l := range labels {
+			labelJSON += fmt.Sprintf(`,%q`, l)
+		}
+		return fmt.Sprintf(`{"id":"%s","title":"%s title","issue_type":"task","status":"open","labels":[%s],"description":"%s title\n\nrole_type: %s\nrig: gastown\nagent_state: %s"}`, id, id, labelJSON, id, role, state)
 	}
 	townList := "[" + strings.Join([]string{
 		`{"id":"hq-mayor","title":"Mayor","issue_type":"task","status":"open","labels":["gt:agent"]}`,
 		`{"id":"hq-deacon","title":"Deacon","issue_type":"task","status":"open","labels":["gt:agent"]}`,
 		agent("gs-gastown-witness", "witness", "running"),
 		agent("gs-gastown-refinery", "refinery", "working"),
-		agent("gs-gastown-polecat-rust", "polecat", "working"),
+		agent("gs-gastown-polecat-rust", "polecat", "working", "done-cp:pushed:polecat/rust/gs-1:1700000001", "safety_stop:gs-stop-1"),
+		agent("gs-gastown-polecat-fury", "polecat", "working"),
 	}, ",") + "]"
+	rigList := "[" + agent("gs-gastown-polecat-fury", "polecat", "idle") + "]"
 
 	logFile = filepath.Join(townRoot, "bd.log")
 	binDir := filepath.Join(townRoot, "bin")
@@ -117,6 +143,7 @@ set -uo pipefail
 logfile=` + fmt.Sprintf("%q", logFile) + `
 town=` + fmt.Sprintf("%q", townBeads) + `
 townlist=` + fmt.Sprintf("%q", townList) + `
+riglist=` + fmt.Sprintf("%q", rigList) + `
 cmd=""; rest=()
 for arg in "$@"; do
   if [[ -z "$cmd" && "$arg" != -* ]]; then cmd="$arg"; continue; fi
@@ -125,24 +152,25 @@ done
 dir="${BEADS_DIR:-<unset>}"
 case "$cmd" in
   list)
-    if [[ "$dir" == "$town" ]]; then printf '%s\n' "$townlist"; else printf '[]\n'; fi
+    if [[ "$dir" == "$town" ]]; then printf '%s\n' "$townlist"; else printf '%s\n' "$riglist"; fi
     ;;
   show)
     id="${rest[0]:-}"
-    if [[ "$dir" == "$town" ]]; then
-      printf '%s\n' "$townlist" | python3 -c 'import json,sys; want=sys.argv[1]; m=[i for i in json.load(sys.stdin) if i["id"]==want]; print(json.dumps(m)) if m else sys.exit(1)' "$id" && exit 0
-    fi
+    list="$riglist"
+    if [[ "$dir" == "$town" ]]; then list="$townlist"; fi
+    printf '%s\n' "$list" | python3 -c 'import json,sys; want=sys.argv[1]; m=[i for i in json.load(sys.stdin) if i["id"]==want]; print(json.dumps(m)) if m else sys.exit(1)' "$id" && exit 0
     echo "Error: no issue found" >&2; exit 1
     ;;
   create)
-    id=""; desc=""
+    id=""; desc=""; labels=""
     for arg in "${rest[@]}"; do
       case "$arg" in
         --id=*) id="${arg#--id=}" ;;
         --description=*) desc="${arg#--description=}" ;;
+        --labels=*) labels="${arg#--labels=}" ;;
       esac
     done
-    printf 'create %s dir=%s desc=%s\n' "$id" "$dir" "${desc//$'\n'/|}" >> "$logfile"
+    printf 'create %s dir=%s labels=%s desc=%s\n' "$id" "$dir" "$labels" "${desc//$'\n'/|}" >> "$logfile"
     printf '{"id":"%s","title":"t","status":"open","labels":["gt:agent"]}\n' "$id"
     ;;
   update|delete|close|reopen)
@@ -169,20 +197,26 @@ func TestAgentBeadsExistCheck_FlagsTownOnlyRigAgents(t *testing.T) {
 		t.Fatalf("Run() status = %v (%s), want warning for town-only rig agents; details=%v", res.Status, res.Message, res.Details)
 	}
 	joined := strings.Join(res.Details, "\n")
-	for _, id := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
-		if !strings.Contains(joined, id) {
-			t.Errorf("Run() details missing misplaced %s: %v", id, res.Details)
+	for _, want := range []string{
+		"gs-gastown-witness (town-only",
+		"gs-gastown-refinery (town-only",
+		"gs-gastown-polecat-rust (town-only",
+		"gs-gastown-polecat-fury (rig-local copy is canonical; town duplicate is stale)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Run() details missing %q: %v", want, res.Details)
 		}
 	}
-	if strings.Contains(joined, "polecat") || strings.Contains(joined, "hq-") {
-		t.Errorf("Run() flagged town-owned beads as misplaced: %v", res.Details)
+	if strings.Contains(joined, "hq-") {
+		t.Errorf("Run() flagged town roles: %v", res.Details)
 	}
 }
 
 // Reconciliation (gt doctor --fix, also run by gt upgrade after a daemon
-// restart) creates rig-local copies carrying the town state, and never
-// mutates or deletes the legacy town copies.
-func TestAgentBeadsExistCheck_FixCreatesRigLocalCopyFromTown(t *testing.T) {
+// restart) migrates town-only rig agent beads, polecats included, into the
+// rig DB with their state and labels, and retires (closes, never deletes or
+// rewrites) the legacy town copies and stale town duplicates.
+func TestAgentBeadsExistCheck_FixMigratesTownOnlyAgentsToRig(t *testing.T) {
 	townRoot, rigBeads, logFile := townOnlyAgentTown(t)
 
 	if err := NewAgentBeadsCheck().Fix(&CheckContext{TownRoot: townRoot}); err != nil {
@@ -194,11 +228,13 @@ func TestAgentBeadsExistCheck_FixCreatesRigLocalCopyFromTown(t *testing.T) {
 		t.Fatalf("reading fake bd log: %v", err)
 	}
 	log := string(data)
-	want := map[string]string{
-		"gs-gastown-witness":  "agent_state: running",
-		"gs-gastown-refinery": "agent_state: working",
+	townBeads := filepath.Join(townRoot, ".beads")
+	want := map[string][]string{
+		"gs-gastown-witness":      {"agent_state: running"},
+		"gs-gastown-refinery":     {"agent_state: working"},
+		"gs-gastown-polecat-rust": {"agent_state: working", "labels=gt:agent,done-cp:pushed:polecat/rust/gs-1:1700000001,safety_stop:gs-stop-1 "},
 	}
-	for id, state := range want {
+	for id, carried := range want {
 		line := ""
 		for _, l := range strings.Split(log, "\n") {
 			if strings.HasPrefix(l, "create "+id+" ") {
@@ -206,20 +242,31 @@ func TestAgentBeadsExistCheck_FixCreatesRigLocalCopyFromTown(t *testing.T) {
 			}
 		}
 		if line == "" {
-			t.Fatalf("Fix() did not create rig-local %s; log:\n%s", id, log)
+			t.Fatalf("Fix() did not migrate %s; log:\n%s", id, log)
 		}
 		if !strings.Contains(line, "dir="+rigBeads+" ") {
 			t.Errorf("Fix() created %s outside the rig DB: %s", id, line)
 		}
-		if !strings.Contains(line, state) {
-			t.Errorf("Fix() did not carry town state %q for %s: %s", state, id, line)
+		for _, field := range carried {
+			if !strings.Contains(line, field) {
+				t.Errorf("Fix() did not carry %q for %s: %s", field, id, line)
+			}
+		}
+		if !strings.Contains(log, "close "+id+" dir="+townBeads+"\n") {
+			t.Errorf("Fix() did not retire the town copy of %s; log:\n%s", id, log)
 		}
 	}
+	if !strings.Contains(log, "close gs-gastown-polecat-fury dir="+townBeads+"\n") {
+		t.Errorf("Fix() did not retire the stale town duplicate of polecat fury; log:\n%s", log)
+	}
 	for _, l := range strings.Split(strings.TrimSpace(log), "\n") {
-		if strings.Contains(l, "polecat") || strings.Contains(l, "hq-") {
-			t.Errorf("Fix() touched a town-owned bead: %s", l)
+		if strings.Contains(l, "hq-") {
+			t.Errorf("Fix() touched a town role bead: %s", l)
 		}
-		if !strings.HasPrefix(l, "create ") {
+		if strings.HasPrefix(l, "create gs-gastown-polecat-fury ") {
+			t.Errorf("Fix() recreated the rig-local polecat fury: %s", l)
+		}
+		if !strings.HasPrefix(l, "create ") && !strings.HasPrefix(l, "close ") {
 			t.Errorf("Fix() mutated an existing bead: %s", l)
 		}
 	}

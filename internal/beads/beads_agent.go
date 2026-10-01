@@ -217,18 +217,23 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 		return nil, fmt.Errorf("refusing to create agent bead: %w (got %q)", ErrFlagTitle, title)
 	}
 
-	target := b.agentBeadTargetFor(id)
-	targetDir := target.getResolvedBeadsDir()
-
 	description := FormatAgentDescription(title, fields)
-	if issue, err := target.createAgentBeadViaStore(context.Background(), id, title, description); err == nil {
+	return b.agentBeadTargetFor(id).createAgentBeadRecord(id, title, description, nil)
+}
+
+// createAgentBeadRecord creates agent bead id in this wrapper's database with
+// the given description. The gt:agent label is always set; extraLabels are
+// added alongside it (used to carry labels over when migrating a legacy copy).
+func (b *Beads) createAgentBeadRecord(id, title, description string, extraLabels []string) (*Issue, error) {
+	labels := agentBeadLabels(extraLabels)
+	if issue, err := b.createAgentBeadViaStore(context.Background(), id, title, description, labels); err == nil {
 		return issue, nil
 	}
 
 	// Ensure target database has custom types configured before falling back to
 	// the bd CLI. The store path above avoids stale external bd schema during
 	// fresh install; this remains for older stores or non-server configurations.
-	_ = EnsureCustomTypes(targetDir)
+	_ = EnsureCustomTypes(b.getResolvedBeadsDir())
 
 	buildArgs := func() []string {
 		a := []string{"create", "--json",
@@ -236,22 +241,22 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 			"--title=" + title,
 			"--description=" + description,
 			"--type=task",
-			"--labels=gt:agent",
+			"--labels=" + strings.Join(labels, ","),
 		}
 		if NeedsForceForID(id) {
 			a = append(a, "--force")
 		}
 		// Default actor from BD_ACTOR env var for provenance tracking
 		// Uses getActor() to respect isolated mode (tests)
-		if actor := target.getActor(); actor != "" {
+		if actor := b.getActor(); actor != "" {
 			a = append(a, "--actor="+actor)
 		}
 		return a
 	}
 
-	out, err := target.run(buildArgs()...)
+	out, err := b.run(buildArgs()...)
 	if err != nil {
-		out, err = target.run(buildArgs()...)
+		out, err = b.run(buildArgs()...)
 		if err != nil {
 			return nil, fmt.Errorf("creating %s: bd create failed: %w", id, err)
 		}
@@ -268,7 +273,22 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	return &issue, nil
 }
 
-func (b *Beads) createAgentBeadViaStore(ctx context.Context, id, title, description string) (*Issue, error) {
+// agentBeadLabels returns gt:agent followed by the distinct non-empty extra
+// labels.
+func agentBeadLabels(extra []string) []string {
+	labels := []string{"gt:agent"}
+	seen := map[string]bool{"gt:agent": true}
+	for _, label := range extra {
+		if label == "" || seen[label] {
+			continue
+		}
+		labels = append(labels, label)
+		seen[label] = true
+	}
+	return labels
+}
+
+func (b *Beads) createAgentBeadViaStore(ctx context.Context, id, title, description string, labels []string) (*Issue, error) {
 	store, cleanup, err := b.OpenStore(ctx)
 	if err != nil {
 		return nil, err
@@ -287,7 +307,7 @@ func (b *Beads) createAgentBeadViaStore(ctx context.Context, id, title, descript
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		CreatedBy:   actor,
-		Labels:      []string{"gt:agent"},
+		Labels:      labels,
 	}
 	if err := store.CreateIssue(ctx, issue, actor); err != nil {
 		return nil, err
@@ -311,16 +331,20 @@ func (b *Beads) createAgentBeadViaStore(ctx context.Context, id, title, descript
 // - If bead is closed (legacy state), reopen then update
 // - If bead is in unknown state, falls back to show+update
 func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (*Issue, error) {
+	// Everything below targets the canonical home (the rig DB for rig-scoped
+	// roles). A legacy town-only copy is migrated there first, so a respawn
+	// reuses it (keeping labels such as safety stops) instead of creating a
+	// fresh rig bead beside a stale town shadow.
+	target, err := b.agentBeadWriteTarget(id)
+	if err != nil {
+		return nil, err
+	}
+
 	// First try to create the bead (no lock needed - create is atomic)
 	issue, err := b.CreateAgentBead(id, title, fields)
 	if err == nil {
 		return issue, nil
 	}
-
-	// Create targets the canonical home (rig DB for witness/refinery/crew),
-	// so the existing-bead path must use the same home: a legacy town-only
-	// copy is never reopened in place of creating the rig-local bead.
-	target := b.agentBeadTargetFor(id)
 
 	// Create failed - need to do Show→Reopen→Update which requires locking
 	// to prevent concurrent modifications (e.g., nuke clearing fields while
@@ -394,7 +418,10 @@ func labelsForAgentBeadReuse(existing []string) []string {
 //
 // This is the standard nuke path (gt-14b8o).
 func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
-	target := b.agentBeadTargetForExisting(id)
+	target, err := b.agentBeadWriteTarget(id)
+	if err != nil {
+		return err
+	}
 
 	// Lock the agent bead to prevent concurrent read-modify-write races.
 	// Without this, a concurrent CreateOrReopenAgentBead could overwrite
@@ -447,8 +474,7 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 // when the agent bead routes to a different beads dir via routes.jsonl.
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
 	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	target := b.agentBeadTargetForExisting(id)
-	return target.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
+	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
 }
 
 // SetHookBead and ClearHookBead removed (hq-l6mm5).
@@ -481,7 +507,11 @@ type AgentFieldUpdates struct {
 // condition where concurrent callers updating different fields overwrite each
 // other because the entire description is replaced.
 func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdates) error {
-	if target := b.agentBeadTargetForExisting(id); target != b {
+	target, err := b.agentBeadWriteTarget(id)
+	if err != nil {
+		return err
+	}
+	if target != b {
 		return target.UpdateAgentDescriptionFields(id, updates)
 	}
 
@@ -571,7 +601,11 @@ func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
 // ClearAgentActiveMRIfMatches clears active_mr only when it still references
 // expectedMR. It returns true when a clear was written.
 func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {
-	if target := b.agentBeadTargetForExisting(id); target != b {
+	target, err := b.agentBeadWriteTarget(id)
+	if err != nil {
+		return false, err
+	}
+	if target != b {
 		return target.ClearAgentActiveMRIfMatches(id, expectedMR)
 	}
 
@@ -683,7 +717,7 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
-	if target := b.agentBeadTargetForExisting(id); target != b {
+	if target := b.agentBeadReadTarget(id); target != b {
 		return target.GetAgentBead(id)
 	}
 

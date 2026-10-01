@@ -490,7 +490,9 @@ esac
 	t.Setenv("MOCK_BD_LOG", logPath)
 }
 
-func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
+// Polecat agent beads live in the owning rig database (gs-8hj): a cross-rig
+// prefix route sends the create to that rig, never to the town DB.
+func TestCreateAgentBead_PolecatUsesOwningRigForCrossRigRoutes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("path assertions are Unix-oriented")
 	}
@@ -538,14 +540,12 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 		t.Fatalf("read mock bd log: %v", err)
 	}
 	logOutput := string(logData)
-	if !strings.Contains(logOutput, "pwd="+townRoot) {
-		t.Fatalf("mock bd log missing town root cwd:\n%s", logOutput)
+	wantCreate := "pwd=" + workerDir + "\nbeads_dir=" + filepath.Join(workerDir, ".beads") + "\nargs=create --json --id=pt-imported-polecat-shiny"
+	if !strings.Contains(logOutput, wantCreate) {
+		t.Fatalf("polecat create did not target the owning rig DB:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")) {
-		t.Fatalf("mock bd log missing town-root BEADS_DIR:\n%s", logOutput)
-	}
-	if !strings.Contains(logOutput, "create --json --id=pt-imported-polecat-shiny") {
-		t.Fatalf("mock bd log missing create call:\n%s", logOutput)
+	if strings.Contains(logOutput, "beads_dir="+filepath.Join(townRoot, ".beads")+"\n") {
+		t.Fatalf("polecat create touched the town DB:\n%s", logOutput)
 	}
 	// Note: hook_bead slot is no longer set — bd slot removed in v0.62 (hq-l6mm5).
 	// Work bead status=hooked and assignee=<agent> is now the authoritative source.
@@ -562,7 +562,9 @@ func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
 	}
 }
 
-func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
+// Respawning a polecat whose bead already exists reuses the rig-local copy,
+// even when called through the town-rooted ForAgentBead wrapper (gs-8hj).
+func TestCreateOrReopenAgentBeadExistingUsesRigBeadsDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
@@ -582,8 +584,10 @@ func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
 	if err := WriteRoutes(townBeadsDir, []Route{{Prefix: "hq-", Path: "."}, {Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
-		t.Fatalf("write types sentinel: %v", err)
+	for _, dir := range []string{townBeadsDir, rigBeadsDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+			t.Fatalf("write types sentinel: %v", err)
+		}
 	}
 
 	binDir := t.TempDir()
@@ -619,13 +623,13 @@ case "$cmd" in
     exit 0
     ;;
 esac
-`, logPath, townBeadsDir)
+`, logPath, rigBeadsDir)
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
 		t.Fatalf("write mock bd: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	bd := NewWithBeadsDir(rigDir, rigBeadsDir)
+	bd := New(townRoot).ForAgentBead()
 	if _, err := bd.CreateOrReopenAgentBead("gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -639,10 +643,10 @@ esac
 		t.Fatalf("read mock log: %v", err)
 	}
 	logOutput := string(logBytes)
-	if strings.Contains(logOutput, "beads_dir="+rigBeadsDir) {
-		t.Fatalf("CreateOrReopenAgentBead used rig BEADS_DIR; log:\n%s", logOutput)
+	if strings.Contains(logOutput, "beads_dir="+townBeadsDir+" ") {
+		t.Fatalf("CreateOrReopenAgentBead used town BEADS_DIR; log:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "beads_dir="+townBeadsDir) || !strings.Contains(logOutput, "args=show") || !strings.Contains(logOutput, "args=update") {
-		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
+	if !strings.Contains(logOutput, "beads_dir="+rigBeadsDir+" args=show") || !strings.Contains(logOutput, "beads_dir="+rigBeadsDir+" args=update") {
+		t.Fatalf("CreateOrReopenAgentBead did not use rig BEADS_DIR for existing bead path; log:\n%s", logOutput)
 	}
 }

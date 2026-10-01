@@ -77,11 +77,12 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	var missing []string
 	var missingLabel []string
 	var misplaced []string
+	var shadowed []string
 	var checked int
 
 	// Keep town and rig agent beads apart so a rig-scoped bead (witness,
-	// refinery, crew) found only in town is reported as misplaced rather than
-	// counted as present (gs-ftg).
+	// refinery, crew, polecat) found only in town is reported as misplaced
+	// rather than counted as present (gs-ftg, gs-8hj).
 	inv := newAgentBeadInventory()
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
 	inv.addTown(beads.New(townBeadsPath))
@@ -101,6 +102,9 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			return
 		case agentBeadTownOnly:
 			misplaced = append(misplaced, id)
+		}
+		if inv.hasTownShadow(id) {
+			shadowed = append(shadowed, id)
 		}
 		if issue != nil && !beads.HasLabel(issue, "gt:agent") {
 			missingLabel = append(missingLabel, id)
@@ -159,12 +163,13 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	return c.result(checked, missing, misplaced, missingLabel)
+	return c.result(checked, missing, misplaced, shadowed, missingLabel)
 }
 
 // result builds the check result: missing beads are errors; misplaced
-// (town-only rig-scoped) beads and missing labels are fixable warnings.
-func (c *AgentBeadsCheck) result(checked int, missing, misplaced, missingLabel []string) *CheckResult {
+// (town-only rig-scoped) beads, stale town shadows of rig-local beads, and
+// missing labels are fixable warnings.
+func (c *AgentBeadsCheck) result(checked int, missing, misplaced, shadowed, missingLabel []string) *CheckResult {
 	if len(missing) > 0 {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -181,6 +186,12 @@ func (c *AgentBeadsCheck) result(checked int, missing, misplaced, missingLabel [
 		problems = append(problems, fmt.Sprintf("%d rig agent bead(s) only in town beads", len(misplaced)))
 		for _, id := range misplaced {
 			details = append(details, id+" (town-only; rig-local copy missing)")
+		}
+	}
+	if len(shadowed) > 0 {
+		problems = append(problems, fmt.Sprintf("%d rig agent bead(s) with a stale town duplicate", len(shadowed)))
+		for _, id := range shadowed {
+			details = append(details, id+" (rig-local copy is canonical; town duplicate is stale)")
 		}
 	}
 	if len(missingLabel) > 0 {
@@ -200,7 +211,7 @@ func (c *AgentBeadsCheck) result(checked int, missing, misplaced, missingLabel [
 		Status:  StatusWarning,
 		Message: strings.Join(problems, ", "),
 		Details: details,
-		FixHint: "Run 'gt doctor --fix' to create rig-local agent beads and add missing labels",
+		FixHint: "Run 'gt doctor --fix' to migrate town-only agent beads to their rigs, retire stale town duplicates, and add missing labels",
 	}
 }
 
@@ -209,7 +220,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// Pre-load all known agent bead IDs (from both issues and wisps tables)
 	// so we can check existence without per-bead Show() calls that miss ephemeral wisps.
 	// Town and rig beads are kept apart so town-only rig-scoped beads can be
-	// repaired in their owning rig database (gs-ftg).
+	// migrated into their owning rig database (gs-ftg, gs-8hj).
 	inv := newAgentBeadInventory()
 
 	// Collect errors instead of failing on first — one broken rig shouldn't
@@ -227,8 +238,9 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// Logic:
 	//   1. If in issues table → ensure gt:agent label
 	//   2. If in wisps table (open) → ensure gt:agent label
-	//   3. If a rig-scoped bead exists only in town → CREATE the rig-local
-	//      copy carrying the town copy's fields; the town copy is left as-is
+	//   3. If a rig-scoped bead exists only in town → MIGRATE it into the rig
+	//      (title, description, labels and status preserved) and retire the
+	//      town copy; a stale town duplicate of a rig-local bead is retired
 	//   4. If exists but closed → REOPEN it (don't recreate)
 	//   5. If truly missing → CREATE it
 	// Uses CreateAgentBead which creates durable agent beads (not wisps)
@@ -238,7 +250,12 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	fixAgentBead := func(bd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
 		presence, issue := inv.lookup(id)
 		if presence == agentBeadTownOnly {
-			return createRigLocalAgentBeadFromTown(bd, townBd, workDir, id, desc, fields)
+			return migrateTownOnlyAgentBead(bd, workDir, id)
+		}
+		if inv.hasTownShadow(id) {
+			if _, err := bd.RetireLegacyAgentBeadShadow(id); err != nil {
+				return err
+			}
 		}
 
 		// Check issues table first
@@ -403,32 +420,23 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	return errors.Join(errs...)
 }
 
-// createRigLocalAgentBeadFromTown repairs a rig-scoped agent bead (witness,
-// refinery, crew) that exists only in the town database by creating its copy
-// in the owning rig database (rigBd's agent-bead home). Title and agent fields
-// are carried over from the town copy when it can be read, so lifecycle state
-// is preserved. The town copy is never modified or deleted: resolvers prefer
-// the rig-local bead, and leaving the legacy copy avoids mutating data the
-// operator has not reviewed.
-func createRigLocalAgentBeadFromTown(rigBd, townBd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
-	title := desc
-	if townIssue, err := townBd.ForAgentBead().Show(id); err == nil && townIssue != nil {
-		townFields := beads.ParseAgentFields(townIssue.Description)
-		townFields.AgentState = beads.ResolveAgentState(townIssue.Description, townIssue.AgentState)
-		if townFields.RoleType == "" {
-			townFields.RoleType = fields.RoleType
-		}
-		if townFields.Rig == "" {
-			townFields.Rig = fields.Rig
-		}
-		fields = townFields
-		if townIssue.Title != "" {
-			title = townIssue.Title
-		}
+// migrateTownOnlyAgentBead repairs a rig-scoped agent bead (witness,
+// refinery, crew, polecat) that exists only in the town database by migrating
+// it into the owning rig database (rigBd's agent-bead home). The migration
+// keeps the bead's title, description, labels and status, and retires the
+// town copy by closing it (it is never deleted).
+func migrateTownOnlyAgentBead(rigBd *beads.Beads, workDir, id string) error {
+	migrated, err := rigBd.MigrateLegacyAgentBead(id)
+	if err != nil {
+		return fmt.Errorf("migrating town-only %s to its rig database: %w", id, err)
 	}
-
-	if _, err := rigBd.CreateAgentBead(id, title, fields); err != nil {
-		return fmt.Errorf("creating rig-local %s (town-only copy exists): %w", id, err)
+	if !migrated {
+		// Nothing moved: fine if the rig copy appeared meanwhile, otherwise
+		// the rig home could not be resolved and the bead is still town-only.
+		if _, showErr := rigBd.ShowAgentBeadAtHome(id); showErr != nil {
+			return fmt.Errorf("could not migrate town-only %s: no rig-local copy after migration: %w", id, showErr)
+		}
+		return nil
 	}
 	_ = addWispLabelSQL(workDir, id, "gt:agent")
 	return nil

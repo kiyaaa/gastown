@@ -52,8 +52,8 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	var entries []DirectoryEntry
 	var warnings int
 
-	// 1. Agent addresses
-	agents, err := b.ListAgentBeads()
+	// 1. Agent addresses (rig-scoped agent beads live in rig databases)
+	agents, err := b.ListAgentBeadsWithRigs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not list agents: %v\n", err)
 		warnings++
