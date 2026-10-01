@@ -45,6 +45,7 @@ func NewMailboxBeadsWithStore(identity, workDir string, store beadsdk.Storage) *
 func NewMailboxWithBeadsDirAndStore(address, workDir, beadsDir string, store beadsdk.Storage) *Mailbox {
 	return &Mailbox{
 		identity: AddressToIdentity(address),
+		owner:    qualifiedWorkerIdentity(address),
 		workDir:  workDir,
 		beadsDir: beadsDir,
 		legacy:   false,
@@ -63,7 +64,7 @@ func (m *Mailbox) storeListFromDir() ([]*Message, error) {
 	ctx, cancel := mailStoreCtx()
 	defer cancel()
 
-	identities := m.identityVariants()
+	identities := m.assigneeVariants()
 
 	seen := make(map[string]bool)
 	messages := make([]*Message, 0)

@@ -80,6 +80,9 @@ func TestMailboxArchiveDelete_RoleOwnerSpellings(t *testing.T) {
 		{"mayor session, legacy bare record", "mayor/", "mayor", "mayor"},
 		{"slash actor, legacy bare record", "mayor", "mayor", "mayor/"},
 		{"rig witness exact match", "gastown/witness", "gastown/witness", "gastown/witness"},
+		{"polecat session, qualified record via rig/name mailbox", "gastown/Toast", "gastown/polecats/Toast", "gastown/polecats/Toast"},
+		{"polecat session, qualified record via qualified mailbox", "gastown/polecats/Toast", "gastown/polecats/Toast", "gastown/polecats/Toast"},
+		{"crew session, qualified record", "gastown/crew/max", "gastown/crew/max", "gastown/crew/max"},
 	}
 	ops := map[string]func(*Mailbox, string) error{
 		"archive": (*Mailbox).Archive,
@@ -113,6 +116,17 @@ func TestMailboxDelete_RejectsDifferentActor(t *testing.T) {
 		{"rig-scoped mayor spelling is not the town mayor", "mayor/", "mayor/", "gastown/mayor"},
 		{"other rig witness cannot close", "gastown/witness", "gastown/witness", "beads/witness"},
 		{"other crew member cannot close", "gastown/crew/max", "gastown/crew/max", "gastown/crew/joe"},
+		{"other polecat cannot close", "gastown/Toast", "gastown/polecats/Toast", "gastown/polecats/Nux"},
+		{"other crew member cannot close", "gastown/crew/max", "gastown/crew/max", "gastown/crew/joe"},
+		{"same-name crew cannot close polecat mail", "gastown/Toast", "gastown/polecats/Toast", "gastown/crew/Toast"},
+		{"same-name polecat cannot close crew mail", "gastown/max", "gastown/crew/max", "gastown/polecats/max"},
+		{"same polecat name in other rig cannot close", "gastown/Toast", "gastown/polecats/Toast", "beads/polecats/Toast"},
+		{"same crew name in other rig cannot close", "gastown/max", "gastown/crew/max", "beads/crew/max"},
+		{"legacy bare record is not owned by polecat", "gastown/Toast", "gastown/Toast", "gastown/polecats/Toast"},
+		{"legacy bare record is not owned by crew", "gastown/Toast", "gastown/Toast", "gastown/crew/Toast"},
+		{"polecat named witness cannot close witness mail", "gastown/witness", "gastown/witness", "gastown/polecats/witness"},
+		{"crew named refinery cannot close refinery mail", "gastown/refinery", "gastown/refinery", "gastown/crew/refinery"},
+		{"polecat named mayor cannot close mayor mail", "mayor/", "mayor/", "gastown/polecats/mayor"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -132,6 +146,46 @@ func TestMailboxDelete_RejectsDifferentActor(t *testing.T) {
 				t.Errorf("close acted as %q, want unchanged caller %q", actors, tt.bdActor)
 			}
 		})
+	}
+}
+
+func TestMailboxArchive_RejectsDifferentWorker(t *testing.T) {
+	tests := []struct {
+		name, mailbox, assignee, bdActor string
+	}{
+		{"other polecat cannot archive", "gastown/Toast", "gastown/polecats/Toast", "gastown/polecats/Nux"},
+		{"other crew member cannot archive", "gastown/crew/max", "gastown/crew/max", "gastown/crew/joe"},
+		{"same-name crew cannot archive polecat mail", "gastown/Toast", "gastown/polecats/Toast", "gastown/crew/Toast"},
+		{"same polecat name in other rig cannot archive", "gastown/Toast", "gastown/polecats/Toast", "beads/polecats/Toast"},
+		{"legacy bare record is not owned by polecat", "gastown/Toast", "gastown/Toast", "gastown/polecats/Toast"},
+		{"polecat named witness cannot archive witness mail", "gastown/witness", "gastown/witness", "gastown/polecats/witness"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, closeLog := installMailOwnershipBd(t, tt.assignee)
+			t.Setenv("BD_ACTOR", tt.bdActor)
+
+			m := NewMailboxWithBeadsDir(tt.mailbox, t.TempDir(), beadsDir)
+			if err := m.Archive("hq-msg1"); err == nil {
+				t.Fatalf("archive as %q on message assigned %q succeeded, want ownership rejection", tt.bdActor, tt.assignee)
+			}
+			actors := readCloseActors(t, closeLog)
+			if len(actors) != 1 || actors[0] != tt.bdActor {
+				t.Errorf("close acted as %q, want unchanged caller %q", actors, tt.bdActor)
+			}
+		})
+	}
+}
+
+// TestWorkerMailAssigneeIsSessionActor pins the source representation: mail
+// addressed to a polecat or crew session's own address is assigned to exactly
+// that session's BD_ACTOR, so bd's exact close check accepts the owner.
+func TestWorkerMailAssigneeIsSessionActor(t *testing.T) {
+	r := &Router{}
+	for _, actor := range []string{"gastown/polecats/Toast", "gastown/crew/max"} {
+		if got := r.MailAssigneeIdentity(actor); got != actor {
+			t.Errorf("MailAssigneeIdentity(%q) = %q, want session actor %q", actor, got, actor)
+		}
 	}
 }
 
