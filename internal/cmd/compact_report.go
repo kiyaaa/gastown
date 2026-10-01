@@ -133,24 +133,55 @@ func runCompactReport(cmd *cobra.Command, args []string) error {
 	return runDailyDigest()
 }
 
-func runDailyDigest() error {
-	now := time.Now().UTC()
-	dateStr := now.Format("2006-01-02")
-	if compactReportDate != "" {
-		if _, err := time.Parse("2006-01-02", compactReportDate); err != nil {
-			return fmt.Errorf("invalid date format (use YYYY-MM-DD): %w", err)
+// compactReportNow is the clock used to pick the default report date.
+// Tests override it to exercise UTC date rollover deterministically.
+var compactReportNow = time.Now
+
+const (
+	compactReportDateLayout = "2006-01-02"
+
+	// compactReportLabel marks every daily compaction report event bead.
+	compactReportLabel = "gt:compaction-report"
+	// compactReportKeyPrefix prefixes the per-day idempotency label.
+	compactReportKeyPrefix = "compaction-report:"
+)
+
+// resolveCompactReportDate returns the report date: the explicit override if
+// given (validated as YYYY-MM-DD), otherwise now's calendar date in UTC. The
+// local timezone never participates, so every agent in a town agrees on which
+// day a run belongs to.
+func resolveCompactReportDate(now time.Time, override string) (string, error) {
+	if override != "" {
+		parsed, err := time.Parse(compactReportDateLayout, override)
+		if err != nil {
+			return "", fmt.Errorf("invalid date format (use YYYY-MM-DD): %w", err)
 		}
-		dateStr = compactReportDate
+		return parsed.Format(compactReportDateLayout), nil
+	}
+	return now.UTC().Format(compactReportDateLayout), nil
+}
+
+// compactReportIdempotencyKey is the deterministic per-day key persisted as a
+// label on every daily report bead. The bd database is town-scoped, so the
+// date alone identifies a town's daily report.
+func compactReportIdempotencyKey(dateStr string) string {
+	return compactReportKeyPrefix + dateStr
+}
+
+func runDailyDigest() error {
+	dateStr, err := resolveCompactReportDate(compactReportNow(), compactReportDate)
+	if err != nil {
+		return err
 	}
 
-	// Idempotency check: see if digest already exists for this date
+	// Idempotency check: see if digest already exists for this date. Fail
+	// closed — proceeding after a failed lookup is how duplicate reports and
+	// duplicate mayor mail get created.
 	existingID, err := findExistingCompactReport(dateStr)
 	if err != nil {
-		// Non-fatal: continue with creation attempt
-		if compactReportVerbose {
-			fmt.Fprintf(os.Stderr, "warning: idempotency check failed: %v\n", err)
-		}
-	} else if existingID != "" {
+		return fmt.Errorf("checking for existing compaction report for %s: %w", dateStr, err)
+	}
+	if existingID != "" {
 		fmt.Printf("%s Compaction digest already sent for %s (bead: %s)\n",
 			style.Dim.Render("○"), dateStr, existingID)
 		return nil
@@ -396,6 +427,7 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 		"--title=" + title,
 		"--event-category=wisp.compaction",
 		"--event-payload=" + string(payloadJSON),
+		"--labels=" + compactReportLabel + "," + compactReportIdempotencyKey(report.Date),
 		"--description=" + markdown,
 		"--silent",
 	}
@@ -655,18 +687,39 @@ func formatWeeklyRollup(rollup *weeklyRollup) string {
 
 // findExistingCompactReport checks if a compaction digest already exists for the given date.
 // Returns the bead ID if found, empty string if not found.
+//
+// The primary lookup is the persisted idempotency label, searched across every
+// status (a report whose auto-close failed is still the day's report) with no
+// row limit. Reports created before the label existed are matched by exact
+// title so a retry on such a day still returns the existing report.
 func findExistingCompactReport(dateStr string) (string, error) {
-	expectedTitle := fmt.Sprintf("Compaction Report %s", dateStr)
+	id, err := findCompactReportEvent(
+		"--label="+compactReportIdempotencyKey(dateStr), "")
+	if err != nil || id != "" {
+		return id, err
+	}
 
+	// Legacy fallback: unlabeled reports from before the idempotency key.
+	title := fmt.Sprintf("Compaction Report %s", dateStr)
+	return findCompactReportEvent("--title="+title, title)
+}
+
+// findCompactReportEvent lists event beads of any status matching filter and
+// returns the oldest one's ID. If exactTitle is non-empty, only events with
+// that exact title count (bd's --title filter is a substring match).
+func findCompactReportEvent(filter, exactTitle string) (string, error) {
 	listCmd := exec.Command("bd", "list",
 		"--type=event",
-		"--status=closed",
+		"--all",
+		filter,
+		"--sort=created",
+		"--reverse", // oldest first: the first report of the day is canonical
 		"--json",
-		"--limit=50",
+		"--limit=0",
 	)
 	listOutput, err := listCmd.Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("listing event beads (%s): %w", filter, err)
 	}
 
 	var events []struct {
@@ -674,11 +727,11 @@ func findExistingCompactReport(dateStr string) (string, error) {
 		Title string `json:"title"`
 	}
 	if err := json.Unmarshal(extractJSONArray(listOutput), &events); err != nil {
-		return "", err
+		return "", fmt.Errorf("parsing event list (%s): %w", filter, err)
 	}
 
 	for _, evt := range events {
-		if evt.Title == expectedTitle {
+		if exactTitle == "" || evt.Title == exactTitle {
 			return evt.ID, nil
 		}
 	}
