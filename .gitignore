@@ -99,3 +99,7 @@ docs/fork-info/
 
 # Gas Town (added by gt)
 GEMINI.md
+
+# Local agent workspace artifacts
+.codegraph
+.omo/
