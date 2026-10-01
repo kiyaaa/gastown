@@ -1941,7 +1941,7 @@ func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// The agent pane is window 0's pane. Record it as the declared identity so
+	// The agent pane is the first window's pane. Record it as the declared identity so
 	// FindAgentPane resolves the nudge target to it.
 	agentPane, err := tm.GetPaneID(sessionName)
 	if err != nil {
@@ -1959,7 +1959,8 @@ func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 
 	// Pre-set both windows to window-size "manual". The wake resets only the
 	// window it targets back to "latest", giving us a deterministic signal.
-	for _, win := range []string{":0", ":1"} {
+	// Use {start}/{end} rather than :0/:1 so the test honors base-index.
+	for _, win := range []string{":{start}", ":{end}"} {
 		if _, err := tm.run("set-option", "-w", "-t", sessionName+win, "window-size", "manual"); err != nil {
 			t.Fatalf("set-option window-size manual on %s: %v", sessionName+win, err)
 		}
@@ -1981,12 +1982,12 @@ func TestNudgeSession_WakesAgentWindowNotActiveWindow(t *testing.T) {
 		return fields[1]
 	}
 
-	// Agent window (0) must have been woken; active window (1) must be untouched.
-	if got := windowSize(":0"); got != "latest" {
-		t.Errorf("agent window (0) window-size = %q, want %q (agent's window was not woken)", got, "latest")
+	// Agent window (first) must have been woken; active window (last) must be untouched.
+	if got := windowSize(":{start}"); got != "latest" {
+		t.Errorf("agent window (first) window-size = %q, want %q (agent's window was not woken)", got, "latest")
 	}
-	if got := windowSize(":1"); got != "manual" {
-		t.Errorf("active window (1) window-size = %q, want %q (wrong window was woken)", got, "manual")
+	if got := windowSize(":{end}"); got != "manual" {
+		t.Errorf("active window (last) window-size = %q, want %q (wrong window was woken)", got, "manual")
 	}
 }
 
@@ -2086,7 +2087,7 @@ func TestCanonicalPaneTargetResolvesAndFallsBack(t *testing.T) {
 	defer func() { _ = tm.KillSession(otherSession) }()
 
 	time.Sleep(200 * time.Millisecond)
-	fallback := sessionName + ":0.0"
+	fallback := firstPaneTargetForTest(t, tm, sessionName)
 	if got := tm.canonicalPaneTarget(sessionName, ""); got != fallback {
 		t.Errorf("empty pane target = %q, want %q", got, fallback)
 	}
@@ -2143,15 +2144,15 @@ func TestNudgeSession_StalePaneIDFallsBackToFirstPane(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	firstPane, err := tm.CapturePane(sessionName+":0.0", 80)
+	firstPane, err := tm.CapturePane(firstPaneTargetForTest(t, tm, sessionName), 80)
 	if err != nil {
 		t.Fatalf("CapturePane first: %v", err)
 	}
-	activePane, err := tm.CapturePane(sessionName+":1.0", 80)
+	activePane, err := tm.CapturePane(sessionName+":{end}", 80)
 	if err != nil {
 		t.Fatalf("CapturePane active: %v", err)
 	}
-	otherPaneContent, err := tm.CapturePane(otherSession+":0.0", 80)
+	otherPaneContent, err := tm.CapturePane(firstPaneTargetForTest(t, tm, otherSession), 80)
 	if err != nil {
 		t.Fatalf("CapturePane other: %v", err)
 	}
@@ -2164,6 +2165,109 @@ func TestNudgeSession_StalePaneIDFallsBackToFirstPane(t *testing.T) {
 	}
 	if strings.Contains(otherPaneContent, marker) {
 		t.Fatalf("cross-session stale pane received nudge marker %q; content:\n%s", marker, otherPaneContent)
+	}
+}
+
+// firstPaneTargetForTest independently resolves the session's first pane as
+// session:window.pane using whatever base-index/pane-base-index the test
+// server has, so assertions do not assume window 0.
+func firstPaneTargetForTest(t *testing.T, tm *Tmux, session string) string {
+	t.Helper()
+	out, err := tm.run("list-panes", "-s", "-t", session, "-F", "#{window_index}.#{pane_index}")
+	if err != nil {
+		t.Fatalf("list-panes %s: %v", session, err)
+	}
+	first, _, _ := strings.Cut(out, "\n")
+	return session + ":" + strings.TrimSpace(first)
+}
+
+// newBaseIndexTestTmux starts a dedicated tmux server (ignoring ~/.tmux.conf)
+// with base-index and pane-base-index set to 1, creates a session on it, and
+// kills the server on cleanup. (gs-ljr)
+func newBaseIndexTestTmux(t *testing.T, sessionName, command string) *Tmux {
+	t.Helper()
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	socket := fmt.Sprintf("gt-test-baseidx-%d-%d", os.Getpid(), time.Now().UnixNano()%100000)
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	t.Cleanup(func() {
+		// tmux can leave the socket file behind after kill-server; remove it.
+		out, err := exec.Command("tmux", "-L", socket, "display-message", "-p", "#{socket_path}").Output()
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		if path := strings.TrimSpace(string(out)); err == nil && path != "" {
+			_ = os.Remove(path)
+		}
+	})
+
+	out, err := exec.Command("tmux", "-L", socket, "-f", os.DevNull, "start-server", ";",
+		"set-option", "-g", "base-index", "1", ";",
+		"set-option", "-g", "pane-base-index", "1", ";",
+		"new-session", "-d", "-s", sessionName, command).CombinedOutput()
+	if err != nil {
+		t.Fatalf("start base-index server: %v\n%s", err, out)
+	}
+	return NewTmuxWithSocket(socket)
+}
+
+func TestFirstPaneTarget_HonorsNonZeroBaseIndex(t *testing.T) {
+	sessionName := "gt-test-baseidx-first"
+	tm := newBaseIndexTestTmux(t, sessionName, "sleep 300")
+
+	want := sessionName + ":1.1"
+	if got := tm.firstPaneTarget(sessionName); got != want {
+		t.Fatalf("firstPaneTarget = %q, want %q", got, want)
+	}
+	if got := tm.canonicalPaneTarget(sessionName, ""); got != want {
+		t.Errorf("canonicalPaneTarget(empty) = %q, want %q", got, want)
+	}
+	if got := tm.canonicalPaneTarget(sessionName, "%999999"); got != want {
+		t.Errorf("canonicalPaneTarget(stale) = %q, want %q", got, want)
+	}
+
+	if _, err := tm.GetPaneID(sessionName); err != nil {
+		t.Errorf("GetPaneID: %v", err)
+	}
+	if _, err := tm.GetPaneWorkDir(sessionName); err != nil {
+		t.Errorf("GetPaneWorkDir: %v", err)
+	}
+}
+
+func TestFirstPaneTarget_MissingSessionReportsSessionNotFound(t *testing.T) {
+	tm := newBaseIndexTestTmux(t, "gt-test-baseidx-present", "sleep 300")
+
+	missing := "gt-test-baseidx-absent"
+	if got, want := tm.firstPaneTarget(missing), missing+":^"; got != want {
+		t.Fatalf("firstPaneTarget(missing) = %q, want %q", got, want)
+	}
+	// tmux display-message exits 0 with empty output for a missing target,
+	// so GetPaneID reports its own "no panes found" error rather than
+	// ErrSessionNotFound; it must still fail rather than return a pane.
+	if pane, err := tm.GetPaneID(missing); err == nil {
+		t.Errorf("GetPaneID(missing) = %q, want error", pane)
+	}
+	if err := tm.NudgeSession(missing, "hello"); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("NudgeSession(missing) err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestNudgeSession_NonZeroBaseIndexDeliversToFirstPane(t *testing.T) {
+	sessionName := "gt-test-baseidx-nudge"
+	tm := newBaseIndexTestTmux(t, sessionName, "cat")
+	time.Sleep(200 * time.Millisecond)
+
+	marker := "GT_NUDGE_BASE_INDEX_" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+	if err := tm.NudgeSession(sessionName, marker); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	content, err := tm.CapturePane(sessionName+":1.1", 80)
+	if err != nil {
+		t.Fatalf("CapturePane: %v", err)
+	}
+	if !strings.Contains(content, marker) {
+		t.Fatalf("first pane did not receive nudge marker %q; content:\n%s", marker, content)
 	}
 }
 

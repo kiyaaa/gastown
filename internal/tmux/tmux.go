@@ -1717,14 +1717,34 @@ type NudgeOpts struct {
 	TownRoot string
 }
 
+// firstPaneTarget returns an explicit session:window.pane target for the
+// session's first pane (lowest pane index in the lowest-indexed window).
+// Indexes are resolved from tmux rather than assumed to be 0, so servers
+// configured with base-index or pane-base-index 1 are honored. If resolution
+// fails (e.g. the session or server is gone), the first-window target
+// "session:^" is returned so the caller's next tmux command reports the real
+// failure (ErrSessionNotFound, ErrNoServer) instead of a bogus window index.
+func (t *Tmux) firstPaneTarget(session string) string {
+	fallback := session + ":^"
+	out, err := t.run("list-panes", "-t", fallback, "-F", "#{session_name}\t#{window_index}\t#{pane_index}")
+	if err != nil {
+		return fallback
+	}
+	first, _, _ := strings.Cut(out, "\n")
+	resolvedSession, _, _ := strings.Cut(first, "\t")
+	if target, ok := canonicalPaneTargetFromDisplay(resolvedSession, first); ok {
+		return target
+	}
+	return fallback
+}
+
 // canonicalPaneTarget converts a pane identifier like "%23" into an explicit
 // tmux session:window.pane target. If the pane is stale or resolves outside the
 // expected session, fall back to the session's first pane instead of the active
 // pane that a bare session target would select.
 func (t *Tmux) canonicalPaneTarget(session, pane string) string {
-	fallback := session + ":0.0"
 	if pane == "" {
-		return fallback
+		return t.firstPaneTarget(session)
 	}
 
 	expectedSession := session
@@ -1736,12 +1756,12 @@ func (t *Tmux) canonicalPaneTarget(session, pane string) string {
 
 	out, err := t.run("display-message", "-t", pane, "-p", "#{session_name}\t#{window_index}\t#{pane_index}")
 	if err != nil {
-		return fallback
+		return t.firstPaneTarget(session)
 	}
 	if target, ok := canonicalPaneTargetFromDisplay(expectedSession, out); ok {
 		return target
 	}
-	return fallback
+	return t.firstPaneTarget(session)
 }
 
 func canonicalPaneTargetFromDisplay(expectedSession, out string) (string, bool) {
@@ -1797,10 +1817,8 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 
 	// Resolve the correct target: in multi-pane sessions, find the pane
 	// running the agent rather than sending to the focused pane.
-	target := session + ":0.0"
-	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		target = t.canonicalPaneTarget(session, agentPane)
-	}
+	agentPane, _ := t.FindAgentPane(session)
+	target := t.canonicalPaneTarget(session, agentPane)
 
 	// 0. Pre-delivery: dismiss Rewind menu if the session is stuck in it.
 	// A previous nudge or user action may have triggered Claude Code's
@@ -2306,10 +2324,10 @@ func (t *Tmux) findAgentPaneByScan(session string) (string, error) {
 
 // GetPaneID returns the pane identifier for a session's first pane.
 // Returns a pane ID like "%0" that can be used with RespawnPane.
-// Targets pane 0 explicitly to be consistent with GetPaneCommand,
-// GetPanePID, and GetPaneWorkDir.
+// Targets the first pane explicitly (honoring base-index/pane-base-index)
+// to be consistent with GetPaneCommand, GetPanePID, and GetPaneWorkDir.
 func (t *Tmux) GetPaneID(session string) (string, error) {
-	out, err := t.run("display-message", "-t", session+":0.0", "-p", "#{pane_id}")
+	out, err := t.run("display-message", "-t", t.firstPaneTarget(session), "-p", "#{pane_id}")
 	if err != nil {
 		return "", err
 	}
@@ -2321,10 +2339,10 @@ func (t *Tmux) GetPaneID(session string) (string, error) {
 }
 
 // GetPaneWorkDir returns the current working directory of a pane.
-// Targets pane 0 explicitly to avoid returning the active pane's
-// working directory in multi-pane sessions.
+// Targets the first pane explicitly (honoring base-index/pane-base-index)
+// to avoid returning the active pane's working directory in multi-pane sessions.
 func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
-	out, err := t.run("display-message", "-t", session+":0.0", "-p", "#{pane_current_path}")
+	out, err := t.run("display-message", "-t", t.firstPaneTarget(session), "-p", "#{pane_current_path}")
 	if err != nil {
 		return "", err
 	}
