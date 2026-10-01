@@ -275,8 +275,16 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 		return err
 	}
 
-	// Close the issue
-	_, err = target.run("close", id, "--reason="+reason)
+	// Close the issue. Escalation mail is assigned to role addresses such as
+	// "mayor/" while the session actor is "mayor"; present the canonical owner
+	// so bd's ownership check accepts the record's own owner (hq-4vo).
+	closeArgs := []string{"close", id, "--reason=" + reason}
+	if actor := target.processActor(); actor != "" {
+		if owner := OwnerActorForAssignee(issue.Assignee, actor); owner != actor {
+			closeArgs = append(closeArgs, "--actor="+owner)
+		}
+	}
+	_, err = target.run(closeArgs...)
 	return err
 }
 
