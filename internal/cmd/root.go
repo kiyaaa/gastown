@@ -189,13 +189,21 @@ func isRoleCommand(cmd *cobra.Command) bool {
 	return false
 }
 
+// isDoneCommand reports whether cmd is the top-level `gt done` command (or one
+// of its descendants). Nested commands that happen to be named "done" — such
+// as `gt dog done`, `gt mol step done`, or `gt wl done` — have their own
+// lifecycles and must not trip the polecat-only ownership gate (gs-qed).
 func isDoneCommand(cmd *cobra.Command) bool {
-	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "done" {
-			return true
-		}
+	if cmd == nil {
+		return false
 	}
-	return false
+	top := cmd
+	for top.HasParent() && top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	// top is now the direct child of the root (or cmd itself when detached,
+	// which stays gated so the check fails closed).
+	return top.Name() == "done"
 }
 
 // initCLITheme initializes the CLI color theme based on settings and environment.
