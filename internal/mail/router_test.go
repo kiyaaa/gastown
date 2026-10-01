@@ -1669,17 +1669,41 @@ func requireNotifyTestSocket(t *testing.T) string {
 	socket := fmt.Sprintf("gt-test-%s-%d", safe, os.Getpid())
 	// Pre-kill any stale server on this socket (e.g., from a crashed prior run).
 	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
+	t.Cleanup(func() { killNotifyTestServer(socket) })
 	return socket
 }
 
+// killNotifyTestServer kills the tmux server on socket and removes its socket
+// file, which tmux can leave behind after kill-server.
+func killNotifyTestServer(socket string) {
+	out, err := exec.Command("tmux", "-L", socket, "display-message", "-p", "#{socket_path}").Output()
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	if path := strings.TrimSpace(string(out)); err == nil && path != "" {
+		_ = os.Remove(path)
+	}
+}
+
 // createNotifyTestSession creates a tmux session on the given socket and waits
-// for it to be ready.
+// for it to be ready. The server ignores the user's ~/.tmux.conf and uses
+// window/pane index 0 so results do not depend on the developer's config.
 func createNotifyTestSession(t *testing.T, socket, sessionName, command string) {
 	t.Helper()
-	args := []string{"-L", socket, "new-session", "-d", "-s", sessionName, command}
+	createNotifyTestSessionWithBaseIndex(t, socket, sessionName, command, 0)
+}
+
+// createNotifyTestSessionWithBaseIndex is like createNotifyTestSession but
+// configures the server's base-index and pane-base-index before creating the
+// session, so the first pane is <baseIndex>.<baseIndex> rather than 0.0.
+// The options are server-global; use at most one base index per socket.
+func createNotifyTestSessionWithBaseIndex(t *testing.T, socket, sessionName, command string, baseIndex int) {
+	t.Helper()
+	idx := strconv.Itoa(baseIndex)
+	args := []string{
+		"-L", socket, "-f", os.DevNull, "start-server", ";",
+		"set-option", "-g", "base-index", idx, ";",
+		"set-option", "-g", "pane-base-index", idx, ";",
+		"new-session", "-d", "-s", sessionName, command,
+	}
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("failed to create test session %q: %v\n%s", sessionName, err, out)
@@ -1741,6 +1765,115 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 	}
 	if len(nudges) != 0 {
 		t.Errorf("expected 0 immediately-deliverable nudges (reminder should be deferred), got %d", len(nudges))
+	}
+}
+
+// TestNotifyRecipient_IdleAgentNonZeroBaseIndex verifies that direct delivery
+// to an idle agent targets the session's real first pane when tmux is
+// configured with base-index/pane-base-index 1 (a common ~/.tmux.conf
+// setting), rather than assuming window 0 and failing with
+// "can't find window: 0". (gs-ljr)
+func TestNotifyRecipient_IdleAgentNonZeroBaseIndex(t *testing.T) {
+	socket := requireNotifyTestSocket(t)
+	sessionName := "gt-crew-baseindex"
+
+	createNotifyTestSessionWithBaseIndex(t, socket, sessionName, `sh -c 'printf "❯ \n" && cat'`, 1)
+	time.Sleep(500 * time.Millisecond)
+
+	panes, err := exec.Command("tmux", "-L", socket, "list-panes", "-s", "-t", sessionName,
+		"-F", "#{window_index}.#{pane_index}").Output()
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	if got := strings.TrimSpace(string(panes)); got != "1.1" {
+		t.Fatalf("fixture first pane = %q, want 1.1", got)
+	}
+
+	townRoot := t.TempDir()
+	r := &Router{
+		workDir:           t.TempDir(),
+		townRoot:          townRoot,
+		tmux:              tmux.NewTmuxWithSocket(socket),
+		IdleNotifyTimeout: 3 * time.Second,
+	}
+
+	msg := &Message{
+		From:    "gastown/crew/sender",
+		To:      "gastown/crew/baseindex",
+		Subject: "base index delivery",
+	}
+
+	if err := r.notifyRecipient(msg); err != nil {
+		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	// The notification must have been typed into the agent's pane, not queued.
+	content, err := exec.Command("tmux", "-L", socket, "capture-pane", "-p", "-t", sessionName+":1.1").Output()
+	if err != nil {
+		t.Fatalf("capture-pane: %v", err)
+	}
+	if !strings.Contains(string(content), "base index delivery") {
+		t.Fatalf("agent pane did not receive notification; content:\n%s", content)
+	}
+
+	// Only the deferred reply-reminder should be queued.
+	pending, _ := nudge.Pending(townRoot, sessionName)
+	if pending != 1 {
+		t.Errorf("expected 1 queued nudge (deferred reply-reminder), got %d", pending)
+	}
+	nudges, err := nudge.Drain(townRoot, sessionName)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 0 {
+		t.Errorf("expected 0 immediately-deliverable nudges, got %d", len(nudges))
+	}
+}
+
+// TestNotifyRecipient_MissingSessionOnLiveServerQueues verifies that when the
+// tmux server is running but the recipient has no session, notification is
+// queued for later delivery without reporting an error.
+func TestNotifyRecipient_MissingSessionOnLiveServerQueues(t *testing.T) {
+	socket := requireNotifyTestSocket(t)
+	// Keep the server alive with an unrelated session.
+	createNotifyTestSession(t, socket, "gt-crew-bystander", "sleep 300")
+
+	townRoot := t.TempDir()
+	r := &Router{
+		workDir:           t.TempDir(),
+		townRoot:          townRoot,
+		tmux:              tmux.NewTmuxWithSocket(socket),
+		IdleNotifyTimeout: 500 * time.Millisecond,
+	}
+
+	msg := &Message{
+		From:     "gastown/crew/sender",
+		To:       "gastown/crew/absent",
+		Subject:  "missing session delivery",
+		ThreadID: "thread-missing-session",
+	}
+
+	if err := r.notifyRecipient(msg); err != nil {
+		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	nudges, err := nudge.Drain(townRoot, "gt-crew-absent")
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 1 {
+		t.Fatalf("expected 1 queued nudge for missing session, got %d", len(nudges))
+	}
+	if nudges[0].ThreadID != msg.ThreadID {
+		t.Errorf("queued nudge ThreadID = %q, want %q", nudges[0].ThreadID, msg.ThreadID)
+	}
+
+	bystander, err := nudge.Pending(townRoot, "gt-crew-bystander")
+	if err != nil {
+		t.Fatalf("Pending(bystander): %v", err)
+	}
+	if bystander != 0 {
+		t.Errorf("bystander session got %d queued nudges, want 0", bystander)
 	}
 }
 
