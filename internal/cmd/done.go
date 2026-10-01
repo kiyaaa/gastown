@@ -922,8 +922,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// skip those stages to avoid repeating work or hitting errors.
 	checkpoints := map[DoneCheckpoint]string{}
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		bd := beads.New(cwd).ForAgentBead()
+		// Bind to the agent bead's home (owning rig DB for polecats).
+		bd := beads.New(cwd).ForAgentBeadID(agentBeadID)
 		setDoneIntentLabel(bd, agentBeadID, exitType)
 		checkpoints = readDoneCheckpoints(bd, agentBeadID)
 		if len(checkpoints) > 0 {
@@ -1459,8 +1459,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write push checkpoint for resume (gt-aufru)
 		if agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
-			cpBd := beads.New(cwd).ForAgentBead()
+			cpBd := beads.New(cwd).ForAgentBeadID(agentBeadID)
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointPushed, branch)
 		}
 
@@ -1825,11 +1824,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 
 			// Update agent bead with active_mr reference (for traceability).
-			// Agent beads live in HQ regardless of rig prefix — bypass routing
-			// via ForAgentBead() to avoid the "issue not found" warning that
-			// leaves active_mr null after every gt done (hq-e73z).
+			// Written to the agent bead's home (owning rig DB for polecats),
+			// the copy that witness, refinery post-merge cleanup, and polecat
+			// list all read (hq-e73z, gs-8hj).
 			if agentBeadID != "" {
-				if err := bd.ForAgentBead().UpdateAgentActiveMR(agentBeadID, mrID); err != nil {
+				if err := bd.ForAgentBeadID(agentBeadID).UpdateAgentActiveMR(agentBeadID, mrID); err != nil {
 					style.PrintWarning("could not update agent bead with active_mr: %v", err)
 				}
 			}
@@ -1854,8 +1853,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Write MR checkpoint for resume (gt-aufru)
 		if mrID != "" && agentBeadID != "" {
-			// Agent bead lives in town DB despite rig prefix — bypass routing.
-			cpBd := beads.New(cwd).ForAgentBead()
+			cpBd := beads.New(cwd).ForAgentBeadID(agentBeadID)
 			writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
 		}
 
@@ -1890,8 +1888,7 @@ notifyWitness:
 	// longer processes routine completions from these fields.
 	fmt.Printf("\nNotifying Witness...\n")
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		completionBd := beads.New(cwd).ForAgentBead()
+		completionBd := beads.New(cwd).ForAgentBeadID(agentBeadID)
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
 			MRID:           mrID,
@@ -1908,8 +1905,7 @@ notifyWitness:
 
 	// Write witness notification checkpoint for resume (gt-aufru)
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		cpBd := beads.New(cwd).ForAgentBead()
+		cpBd := beads.New(cwd).ForAgentBeadID(agentBeadID)
 		writeDoneCheckpoint(cpBd, agentBeadID, CheckpointWitnessNotified, "ok")
 	}
 
@@ -2299,11 +2295,11 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
 	}
 	bd := beads.New(beadsPath)
-	// agentBd bypasses prefix routing — agent beads (gt:agent label) live in
-	// the town DB regardless of their ID prefix, but the rig-prefix routing
-	// would otherwise misroute them to the rig DB and silently fail with
-	// "issue not found". See beads.ForAgentBead docstring for details.
-	agentBd := bd.ForAgentBead()
+	// agentBd is bound to the agent bead's home database (the owning rig DB
+	// for polecats, witness, and refinery; see beads/agent_locality.go), so
+	// the generic label reads/writes below hit the same copy as the agent
+	// field updates.
+	agentBd := bd.ForAgentBeadID(agentBeadID)
 
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
@@ -2452,8 +2448,19 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	if id == "" {
 		return
 	}
-	// Check the canonical home only: a witness/refinery bead that exists solely
-	// as a legacy town copy must be recreated in its owning rig database.
+	// A bead that exists solely as a legacy town copy is moved into its owning
+	// rig database with every field and label intact, so an in-flight gt done
+	// keeps its checkpoints and hook (gs-8hj).
+	if migrated, err := bd.MigrateLegacyAgentBead(id); migrated {
+		fmt.Printf("%s Migrated legacy town agent bead to its rig database: %s\n", style.Bold.Render("✓"), id)
+		if err != nil {
+			style.PrintWarning("%v", err)
+		}
+	} else if err != nil {
+		style.PrintWarning("could not migrate legacy agent bead %s: %v", id, err)
+	}
+	// Check the canonical home only: a rig agent bead that exists solely as a
+	// legacy town copy must be recreated in its owning rig database.
 	if issue, err := bd.ShowAgentBeadAtHome(id); err == nil && issue != nil && issue.Status != string(beads.StatusClosed) {
 		return // exists and is active
 	}

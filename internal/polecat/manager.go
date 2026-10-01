@@ -1305,8 +1305,9 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 }
 
 // ActiveMRRemovalBlocker returns the pending active-MR reason that should block
-// non-force polecat removal. It reads agent metadata from the town agent-bead
-// store, then classifies the MR/source through the normal rig beads reader.
+// non-force polecat removal. It reads agent metadata from the polecat's agent
+// bead (in the owning rig DB), then classifies the MR/source through the
+// normal rig beads reader.
 func (m *Manager) ActiveMRRemovalBlocker(name string) (string, string) {
 	agentID := m.agentBeadID(name)
 	_, fields, err := m.agentBeads().GetAgentBead(agentID)
@@ -2380,7 +2381,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	activeMRSafe := true
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
-		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
+		assessment := AssessActiveMR(m.beads, ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}

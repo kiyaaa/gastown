@@ -558,12 +558,10 @@ type Beads struct {
 	townRootOnce sync.Once
 
 	// noRoute disables prefix-based routing for this Beads instance.
-	// Used for agent-bead operations: polecat and town-role agent beads
-	// (gt:agent label) live in the town database regardless of their ID
-	// prefix, so prefix routing (which assumes "za-*" → zack DB) misroutes
-	// them. When set, Show()
-	// and forIssueID() skip ResolveRoutingTarget and operate against
-	// beadsDir directly.
+	// Used for wrappers already bound to a specific database (ForAgentBead,
+	// agent-bead home wrappers, forIssueID results). When set, Show() and
+	// forIssueID() skip ResolveRoutingTarget and operate against beadsDir
+	// directly.
 	noRoute bool
 
 	// agentTargetResolved marks a wrapper already bound to the home database
@@ -572,7 +570,7 @@ type Beads struct {
 	agentTargetResolved bool
 
 	// rigAgentHome marks a resolved wrapper bound to a rig database for a
-	// rig-scoped agent bead (witness, refinery, crew).
+	// rig-scoped agent bead (witness, refinery, crew, polecat).
 	rigAgentHome bool
 }
 
@@ -604,23 +602,16 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
-// Agent operations on rig-scoped roles (witness, refinery, crew) issued
-// through this wrapper are still re-targeted to the owning rig database; see
-// agent_locality.go.
+// The wrapper is rooted at the town's .beads directory with prefix routing
+// disabled (noRoute), which is where town-role agent beads (mayor, deacon,
+// dog) live. Agent operations issued through it (CreateAgentBead,
+// UpdateAgentDescriptionFields, GetAgentBead, ...) re-target each bead to its
+// canonical home, so rig-scoped beads (witness, refinery, crew, polecat) still
+// land in the owning rig database; see agent_locality.go.
 //
-// Polecat and town-role agent beads (labeled gt:agent) live in the TOWN database, but their IDs
-// are prefixed with the rig prefix (e.g. "za-zack-polecat-furiosa"). The
-// default prefix routing in routes.jsonl maps "za-" → zack rig database, so
-// any agent-bead operation issued from a rig context (or any context that
-// triggers routing) gets sent to the wrong DB and fails with "issue not
-// found". This silently breaks gt done's hook clearing, agent state
-// transition, completion metadata, etc.
-//
-// ForAgentBead bypasses that:
-//   - Re-roots the wrapper at the town's .beads directory (so bd CLI itself
-//     opens the town/hq Dolt database where agent beads live).
-//   - Sets noRoute=true so the Go-side routing helpers (Show,
-//     ResolveRoutingTarget, forIssueID) do not redirect lookups by prefix.
+// Generic Show/Update calls on this wrapper do NOT re-target: they operate on
+// the town database. Use ForAgentBeadID for generic calls on a specific agent
+// bead.
 //
 // If the town root cannot be determined, returns the original wrapper to
 // preserve current behavior.
@@ -720,8 +711,7 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 // ID to determine the owning database.
 //
 // When noRoute is set (see ForAgentBead), routing is skipped: the wrapper is
-// returned unchanged. Used for agent-bead operations whose IDs share the rig
-// prefix but whose data lives in the town DB.
+// returned unchanged because it is already bound to its database.
 func (b *Beads) forIssueID(id string) *Beads {
 	if b.noRoute {
 		return b
