@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -419,4 +421,110 @@ func TestTestutilSymlinkCheck_NoInternalDir(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when crew has no internal/, got %v: %s", result.Status, result.Message)
 	}
+}
+
+// TestTestutilSymlinkCheck_TrackedDirLeftIntact is a regression test for gs-172:
+// when internal/testutil is tracked by the clone's own git repo, replacing it
+// with a symlink makes git report every tracked file as deleted and the path
+// as untracked (and breaks stash/checkout with "Unable to process path").
+// Run must not flag such a directory and Fix must leave the worktree
+// byte-for-byte unchanged.
+func TestTestutilSymlinkCheck_TrackedDirLeftIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigPath := filepath.Join(tmpDir, rigName)
+
+	canonical := filepath.Join(rigPath, "mayor", "rig", "internal", "testutil")
+	if err := os.MkdirAll(canonical, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "helper.go"), []byte("package testutil\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	clones := []string{
+		filepath.Join(rigPath, "refinery", "rig"),
+		filepath.Join(rigPath, "crew", "alice"),
+	}
+	for _, clone := range clones {
+		testutilDir := filepath.Join(clone, "internal", "testutil")
+		if err := os.MkdirAll(testutilDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(testutilDir, "helper.go"), []byte("package testutil\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, clone, "init", "-q")
+		runGit(t, clone, "add", "internal/testutil")
+		runGit(t, clone, "commit", "-q", "-m", "track testutil")
+	}
+
+	before := make(map[string]string, len(clones))
+	for _, clone := range clones {
+		before[clone] = snapshotWorktree(t, clone)
+	}
+
+	check := NewTestutilSymlinkCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+
+	result := check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for git-tracked testutil dirs, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+
+	for _, clone := range clones {
+		if after := snapshotWorktree(t, clone); after != before[clone] {
+			t.Errorf("worktree %s mutated by testutil-symlink check\nbefore:\n%s\nafter:\n%s", clone, before[clone], after)
+		}
+	}
+}
+
+// snapshotWorktree captures git status plus the type and content of every
+// file outside .git, so any delete/replace/convert of a tracked path shows up.
+func snapshotWorktree(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("status:\n")
+	b.WriteString(runGit(t, dir, "status", "--porcelain=v1", "--untracked-files=all"))
+	b.WriteString("\nfiles:\n")
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "%s symlink -> %s\n", rel, target)
+		case info.IsDir():
+			fmt.Fprintf(&b, "%s dir\n", rel)
+		default:
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "%s file %s %x\n", rel, info.Mode().Perm(), sha256.Sum256(content))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", dir, err)
+	}
+	return b.String()
 }
