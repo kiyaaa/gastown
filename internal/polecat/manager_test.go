@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -1374,7 +1372,8 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 	// follow redirects correctly, it may create PRIME.md locally instead
 	// of at the rig-level beads location.
 
-	root := t.TempDir()
+	// The rig directory name must match rig.Name so town routes resolve.
+	root := filepath.Join(t.TempDir(), "rig")
 
 	// Create mayor/rig directory structure
 	mayorRig := filepath.Join(root, "mayor", "rig")
@@ -1398,21 +1397,8 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 		t.Fatalf("write rig redirect: %v", err)
 	}
 
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	// Initialize a per-test beads database so agent bead creation works.
+	initRigBeadsForAddTest(t, root)
 
 	// Initialize git repo in mayor/rig WITHOUT any .beads/PRIME.md
 	cmd := exec.Command("git", "init")
@@ -1726,7 +1712,8 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	// polecats/.claude/settings.json directory (outside worktrees), so they
 	// never appear in any worktree's git status.
 
-	root := t.TempDir()
+	// The rig directory name must match rig.Name so town routes resolve.
+	root := filepath.Join(t.TempDir(), "rig")
 
 	// Create mayor/rig directory structure
 	mayorRig := filepath.Join(root, "mayor", "rig")
@@ -1748,21 +1735,8 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 		t.Fatalf("write rig redirect: %v", err)
 	}
 
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	// Initialize a per-test beads database so agent bead creation works.
+	initRigBeadsForAddTest(t, root)
 
 	// Initialize a CLEAN git repo with known files only
 	cmd := exec.Command("git", "init")
@@ -1831,9 +1805,17 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	m := NewManager(r, git.NewGit(root), nil)
 
 	// Create polecat
+	sourceBefore := sourceRepoSnapshot(t, mayorRig)
+
 	polecat, err := m.AddWithOptions("TestClean", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	// The source repository the worktree was created from must be untouched:
+	// same HEAD, no new tracked, untracked, or ignored files (gs-ct8).
+	if sourceAfter := sourceRepoSnapshot(t, mayorRig); sourceAfter != sourceBefore {
+		t.Errorf("polecat creation changed the source repository\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
 	}
 
 	// Run git status in worktree - should show nothing except .beads/ (infrastructure)
@@ -1872,7 +1854,8 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 	// Claude Code with --settings supports parent directory settings, and placing
 	// them at the polecats/ level avoids polluting individual worktree repos.
 
-	root := t.TempDir()
+	// The rig directory name must match rig.Name so town routes resolve.
+	root := filepath.Join(t.TempDir(), "rig")
 
 	// Create mayor/rig directory structure
 	mayorRig := filepath.Join(root, "mayor", "rig")
@@ -1894,21 +1877,8 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 		t.Fatalf("write rig redirect: %v", err)
 	}
 
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	// Initialize a per-test beads database so agent bead creation works.
+	initRigBeadsForAddTest(t, root)
 
 	// Initialize a git repo
 	cmd := exec.Command("git", "init")
@@ -1952,9 +1922,17 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 	m := NewManager(r, git.NewGit(root), nil)
 
 	// Create polecat
+	sourceBefore := sourceRepoSnapshot(t, mayorRig)
+
 	polecat, err := m.AddWithOptions("TestSettings", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
+	}
+
+	// The source repository the worktree was created from must be untouched:
+	// same HEAD, no new tracked, untracked, or ignored files (gs-ct8).
+	if sourceAfter := sourceRepoSnapshot(t, mayorRig); sourceAfter != sourceBefore {
+		t.Errorf("polecat creation changed the source repository\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
 	}
 
 	// Verify settings.json exists in the SHARED polecats/ parent directory
@@ -1965,11 +1943,12 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 		t.Errorf("settings.json should exist at %s (shared polecats dir) for Claude Code to find hooks", settingsPath)
 	}
 
-	// Verify settings.json does NOT exist inside the worktree (no longer installed there)
-	worktreeSettingsPath := filepath.Join(polecat.ClonePath, ".claude", "settings.json")
-	if _, err := os.Stat(worktreeSettingsPath); err == nil {
-		t.Errorf("settings.json should NOT exist inside worktree at %s (settings are now in shared polecats dir)", worktreeSettingsPath)
-	}
+	// Settings must not land inside the worktree, the per-polecat directory,
+	// the source repository, or the rig root.
+	assertNoManagedSettingsIn(t, polecat.ClonePath)
+	assertNoManagedSettingsIn(t, filepath.Dir(polecat.ClonePath))
+	assertNoManagedSettingsIn(t, mayorRig)
+	assertNoManagedSettingsIn(t, root)
 }
 
 // TestOverflowNameSessionFormat verifies that overflow names don't create double-prefix.
