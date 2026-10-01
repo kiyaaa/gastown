@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -10,6 +11,10 @@ import (
 // TestutilSymlinkCheck verifies that crew and refinery/rig internal/testutil/
 // directories are symlinks to the canonical mayor/rig/internal/testutil/.
 // This prevents identical-copies drift across rig clones.
+//
+// A real internal/testutil directory that the clone's own git repo tracks is
+// left alone: replacing it with a symlink makes git see every tracked file as
+// deleted and breaks stash/checkout in that worktree (gs-172).
 type TestutilSymlinkCheck struct {
 	FixableCheck
 	issues []symlinkIssue
@@ -139,6 +144,10 @@ func (c *TestutilSymlinkCheck) checkSymlink(testutilPath, canonicalResolved, lab
 	}
 
 	if info.Mode()&os.ModeSymlink == 0 {
+		if testutilTrackedByGit(testutilPath) {
+			// Tracked source of this clone, not a drifted copy.
+			return
+		}
 		// Not a symlink — it's a real directory (the drift problem)
 		c.issues = append(c.issues, symlinkIssue{
 			dir:     label,
@@ -202,6 +211,11 @@ func (c *TestutilSymlinkCheck) Fix(ctx *CheckContext) error {
 			return fmt.Errorf("cannot compute relative path for %s: %w", issue.dir, err)
 		}
 
+		if info, err := os.Lstat(issue.path); err == nil &&
+			info.Mode()&os.ModeSymlink == 0 && testutilTrackedByGit(issue.path) {
+			return fmt.Errorf("refusing to replace git-tracked %s with a symlink", issue.path)
+		}
+
 		// Remove existing dir/symlink
 		if err := os.RemoveAll(issue.path); err != nil {
 			return fmt.Errorf("cannot remove %s: %w", issue.path, err)
@@ -214,4 +228,18 @@ func (c *TestutilSymlinkCheck) Fix(ctx *CheckContext) error {
 	}
 
 	return nil
+}
+
+// testutilTrackedByGit reports whether <clone>/internal/testutil is tracked by
+// the git repo of the clone that contains it. When git cannot answer but the
+// clone has a .git entry, it errs on the side of treating the path as tracked
+// so the worktree is never mutated on a guess.
+func testutilTrackedByGit(testutilPath string) bool {
+	clone := filepath.Dir(filepath.Dir(testutilPath))
+	out, err := exec.Command("git", "-C", clone, "ls-files", "-z", "--", "internal/testutil").Output()
+	if err != nil {
+		_, statErr := os.Lstat(filepath.Join(clone, ".git"))
+		return statErr == nil
+	}
+	return len(out) > 0
 }
