@@ -109,7 +109,7 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("%s", message)
 	}
 	if rig != "" && agentBeadSourceIsTown(match.Source) && !agentsResolveJSON {
-		return fmt.Errorf("agent bead %s was found only in %s; patrol await/state commands require a rig-local agent bead", match.ID, match.Source)
+		return fmt.Errorf("agent bead %s was found only in %s; patrol await/state commands require a rig-local agent bead (run 'gt doctor --fix' to create it in the rig database)", match.ID, match.Source)
 	}
 
 	if agentsResolveJSON {

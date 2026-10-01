@@ -217,7 +217,7 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 		return nil, fmt.Errorf("refusing to create agent bead: %w (got %q)", ErrFlagTitle, title)
 	}
 
-	target := b.agentBeadTarget()
+	target := b.agentBeadTargetFor(id)
 	targetDir := target.getResolvedBeadsDir()
 
 	description := FormatAgentDescription(title, fields)
@@ -317,10 +317,15 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 		return issue, nil
 	}
 
+	// Create targets the canonical home (rig DB for witness/refinery/crew),
+	// so the existing-bead path must use the same home: a legacy town-only
+	// copy is never reopened in place of creating the rig-local bead.
+	target := b.agentBeadTargetFor(id)
+
 	// Create failed - need to do Show→Reopen→Update which requires locking
 	// to prevent concurrent modifications (e.g., nuke clearing fields while
 	// spawn is updating them). See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
+	fl, lockErr := target.lockAgentBead(id)
 	if lockErr != nil {
 		return nil, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
 	}
@@ -328,8 +333,6 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 
 	// Create failed - check if bead already exists (handles both open and closed states)
 	createErr := err
-
-	target := b.agentBeadTarget()
 
 	existing, showErr := target.Show(id)
 	if showErr != nil {
@@ -391,16 +394,16 @@ func labelsForAgentBeadReuse(existing []string) []string {
 //
 // This is the standard nuke path (gt-14b8o).
 func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
+	target := b.agentBeadTargetForExisting(id)
+
 	// Lock the agent bead to prevent concurrent read-modify-write races.
 	// Without this, a concurrent CreateOrReopenAgentBead could overwrite
 	// the nuked state we're about to set. See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
+	fl, lockErr := target.lockAgentBead(id)
 	if lockErr != nil {
 		return fmt.Errorf("locking agent bead %s: %w", id, lockErr)
 	}
 	defer func() { _ = fl.Unlock() }()
-
-	target := b.agentBeadTarget()
 
 	// Get current issue to preserve immutable fields (title, role_type, rig)
 	issue, err := target.Show(id)
@@ -444,7 +447,7 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 // when the agent bead routes to a different beads dir via routes.jsonl.
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
 	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	target := b.agentBeadTarget()
+	target := b.agentBeadTargetForExisting(id)
 	return target.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
 }
 
@@ -478,7 +481,7 @@ type AgentFieldUpdates struct {
 // condition where concurrent callers updating different fields overwrite each
 // other because the entire description is replaced.
 func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdates) error {
-	if target := b.agentBeadTarget(); target != b {
+	if target := b.agentBeadTargetForExisting(id); target != b {
 		return target.UpdateAgentDescriptionFields(id, updates)
 	}
 
@@ -568,7 +571,7 @@ func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
 // ClearAgentActiveMRIfMatches clears active_mr only when it still references
 // expectedMR. It returns true when a clear was written.
 func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {
-	if target := b.agentBeadTarget(); target != b {
+	if target := b.agentBeadTargetForExisting(id); target != b {
 		return target.ClearAgentActiveMRIfMatches(id, expectedMR)
 	}
 
@@ -680,7 +683,7 @@ func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
 // GetAgentBead retrieves an agent bead by ID.
 // Returns nil if not found.
 func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
-	if target := b.agentBeadTarget(); target != b {
+	if target := b.agentBeadTargetForExisting(id); target != b {
 		return target.GetAgentBead(id)
 	}
 

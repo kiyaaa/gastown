@@ -131,3 +131,24 @@ func candidate(id string, source agentBeadSource, status string) agentBeadCandid
 		Issue:  &beads.Issue{ID: id, Status: status},
 	}
 }
+
+// After gt doctor --fix repairs a town-only rig agent (gs-ftg), the same ID
+// exists in both databases; the rig-local copy must win without a duplicate
+// error so patrol await/state commands use it.
+func TestPickBestAgentBeadPrefersRigCopyOverTownDuplicate(t *testing.T) {
+	candidates := []agentBeadCandidate{
+		candidate("um-usage_monitor-witness", agentSourceTownIssues, "open"),
+		candidate("um-usage_monitor-witness", agentSourceRigIssues, "open"),
+	}
+
+	got, err := pickBestAgentBead(candidates)
+	if err != nil {
+		t.Fatalf("pickBestAgentBead returned error: %v", err)
+	}
+	if got == nil || got.Source != agentSourceRigIssues {
+		t.Fatalf("pickBestAgentBead picked %+v, want rig-issues copy", got)
+	}
+	if agentBeadSourceIsTown(got.Source) {
+		t.Fatalf("picked copy is town-sourced; resolve would refuse it")
+	}
+}
