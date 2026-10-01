@@ -525,6 +525,18 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 		return m.storeGetFromDir(id)
 	}
 
+	bm, err := m.showBeadsMessage(id, beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wisp status comes from beads issue.wisp field via ToMessage()
+	return bm.ToMessage(), nil
+}
+
+// showBeadsMessage reads the raw beads record for a message via bd show.
+// Unlike getFromDir, the returned Assignee keeps its stored spelling.
+func (m *Mailbox) showBeadsMessage(id, beadsDir string) (*BeadsMessage, error) {
 	args := []string{"show", id, "--json"}
 
 	ctx, cancel := bdReadCtx()
@@ -548,9 +560,7 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 	if len(bms) == 0 {
 		return nil, ErrMessageNotFound
 	}
-
-	// Wisp status comes from beads issue.wisp field via ToMessage()
-	return bms[0].ToMessage(), nil
+	return &bms[0], nil
 }
 
 func (m *Mailbox) getLegacy(id string) (*Message, error) {
@@ -602,6 +612,9 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)
 	}
+	if owner := m.closeOwnerActor(id, beadsDir); owner != "" {
+		args = append(args, "--actor="+owner)
+	}
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
@@ -618,6 +631,30 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	}
 
 	return nil
+}
+
+// closeOwnerActor returns the --actor value needed for bd to accept this
+// mailbox's owner closing message id, or "" when the process actor should be
+// used as-is. Mayor and deacon sessions run as "mayor"/"deacon" while their
+// mail is assigned to "mayor/"/"deacon/" (or a legacy bare spelling); bd
+// rejects that mismatch (hq-4vo). The override applies only when the process
+// actor is this mailbox's identity under beads.CanonicalActorIdentity and the
+// stored assignee is the same identity, so a different actor is still refused
+// by bd's ownership check.
+func (m *Mailbox) closeOwnerActor(id, beadsDir string) string {
+	actor := beads.ProcessActor()
+	if !beads.IsRoleOnlyActorIdentity(actor) || !beads.SameActorIdentity(actor, m.identity) {
+		return ""
+	}
+	bm, err := m.showBeadsMessage(id, beadsDir)
+	if err != nil {
+		// Let the close itself surface not-found or bd errors.
+		return ""
+	}
+	if owner := beads.OwnerActorForAssignee(bm.Assignee, actor); owner != actor {
+		return owner
+	}
+	return ""
 }
 
 func (m *Mailbox) markReadLegacy(id string) error {

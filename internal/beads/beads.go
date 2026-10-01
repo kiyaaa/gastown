@@ -658,6 +658,16 @@ func (b *Beads) getActor() string {
 	return os.Getenv("BD_ACTOR")
 }
 
+// processActor returns the actor bd will use for this wrapper's subprocesses
+// when no --actor flag is passed. Isolated mode strips actor env vars, so it
+// reports none.
+func (b *Beads) processActor() string {
+	if b.isolated {
+		return ""
+	}
+	return ProcessActor()
+}
+
 // getTownRoot returns the Gas Town root directory, using lazy caching.
 // The town root is found by walking up from workDir looking for mayor/town.json.
 // Returns empty string if not in a Gas Town project.
