@@ -236,3 +236,43 @@ func dirExists(path string) bool {
 func sameDir(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
+
+// ListAgentBeadsWithRigs lists agent beads from this wrapper's database plus
+// every routed rig database in its town. Use it where a town-wide agent view
+// is needed: rig-scoped agent beads (witness, refinery, crew, polecat) live in
+// their owning rig database, so a town-only listing misses them. For a
+// rig-scoped bead found in several databases the rig-local copy wins over a
+// legacy town duplicate. Rig databases that cannot be listed are skipped.
+func (b *Beads) ListAgentBeadsWithRigs() (map[string]*Issue, error) {
+	agents, err := b.ListAgentBeads()
+	if err != nil {
+		return nil, err
+	}
+	townRoot := b.getTownRoot()
+	if townRoot == "" {
+		return agents, nil
+	}
+	routes, err := LoadRoutes(GetTownBeadsPath(townRoot))
+	if err != nil {
+		return agents, nil
+	}
+	seen := map[string]bool{b.getResolvedBeadsDir(): true}
+	for _, route := range routes {
+		if route.Path == "." {
+			continue
+		}
+		rigBeads := ResolveBeadsDir(filepath.Join(townRoot, route.Path))
+		if seen[rigBeads] || !dirExists(rigBeads) {
+			continue
+		}
+		seen[rigBeads] = true
+		rigAgents, rigErr := NewWithBeadsDir(filepath.Dir(rigBeads), rigBeads).ListAgentBeads()
+		if rigErr != nil {
+			continue
+		}
+		for id, issue := range rigAgents {
+			agents[id] = issue
+		}
+	}
+	return agents, nil
+}

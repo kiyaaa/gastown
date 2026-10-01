@@ -333,7 +333,8 @@ type defaultHealthSource struct {
 }
 
 func (s *defaultHealthSource) ListAgentBeads() (map[string]*beads.Issue, error) {
-	return s.bd.ListAgentBeads()
+	// Rig-scoped agent beads (polecats included) live in rig databases.
+	return s.bd.ListAgentBeadsWithRigs()
 }
 
 func (s *defaultHealthSource) IsSessionAlive(sessionName string) (bool, error) {

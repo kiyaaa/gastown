@@ -221,7 +221,8 @@ func (r *Resolver) resolvePattern(pattern string) ([]Recipient, error) {
 	}
 
 	// Get all agent beads
-	agents, err := r.beads.ListAgentBeads()
+	// Rig-scoped agent beads (polecats included) live in rig databases.
+	agents, err := r.beads.ListAgentBeadsWithRigs()
 	if err != nil {
 		return nil, fmt.Errorf("listing agents: %w", err)
 	}
