@@ -167,7 +167,7 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		status.RuntimeNotified = true
 
 		mailBeads := beads.New(beads.ResolveBeadsDir(townRoot))
-		mailIssue, err := mailBeads.FindLatestIssueByTitleAndAssignee(msg.Subject, mail.AddressToIdentity(target))
+		mailIssue, err := mailBeads.FindLatestIssueByTitleAndAssignee(msg.Subject, router.MailAssigneeIdentity(target))
 		if err != nil {
 			status.Warning = fmt.Sprintf("annotation lookup failed: %v", err)
 			statuses = append(statuses, status)

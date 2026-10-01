@@ -1132,6 +1132,10 @@ func (r *Router) sendToSingle(msg *Message) error {
 		return fmt.Errorf("invalid recipient %q: %w", msg.To, err)
 	}
 
+	// Store worker mail under the recipient session's own qualified identity
+	// so it owns the record under bd's exact close check (gs-7cz).
+	assignee := r.mailAssigneeIdentity(msg.To, toIdentity)
+
 	// Build labels for type, from/thread/reply-to/cc
 	labels := r.buildLabels(msg)
 
@@ -1140,7 +1144,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 	// This prevents subjects like "--help" from being parsed as flags (see web/api.go).
 	// Let bd auto-generate the ID with the correct database prefix.
 	args := []string{"create",
-		"--assignee", toIdentity,
+		"--assignee", assignee,
 		"-d", msg.Body,
 	}
 
@@ -1586,7 +1590,9 @@ func isSelfMail(from, to string) bool {
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 	beadsDir := r.resolveBeadsDir()
 	workDir := filepath.Dir(beadsDir) // Parent of .beads
-	return NewMailboxFromAddress(address, workDir), nil
+	mailbox := NewMailboxFromAddress(address, workDir)
+	mailbox.owner = r.mailAssigneeIdentity(address, mailbox.identity)
+	return mailbox, nil
 }
 
 // notifyRecipient sends a notification to a recipient's tmux session.

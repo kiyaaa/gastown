@@ -36,6 +36,7 @@ var (
 // directly instead of shelling out to the bd CLI.
 type Mailbox struct {
 	identity string // beads identity (e.g., "gastown/polecats/Toast")
+	owner    string // qualified worker assignee, when known (see mailAssigneeIdentity)
 	workDir  string // directory to run bd commands in
 	beadsDir string // explicit .beads directory path (set via BEADS_DIR)
 	path     string // for legacy JSONL mode (crew workers)
@@ -71,6 +72,7 @@ func NewMailboxFromAddress(address, workDir string) *Mailbox {
 	beadsDir := beads.ResolveBeadsDir(workDir)
 	return &Mailbox{
 		identity: AddressToIdentity(address),
+		owner:    qualifiedWorkerIdentity(address),
 		workDir:  workDir,
 		beadsDir: beadsDir,
 		legacy:   false,
@@ -81,6 +83,7 @@ func NewMailboxFromAddress(address, workDir string) *Mailbox {
 func NewMailboxWithBeadsDir(address, workDir, beadsDir string) *Mailbox {
 	return &Mailbox{
 		identity: AddressToIdentity(address),
+		owner:    qualifiedWorkerIdentity(address),
 		workDir:  workDir,
 		beadsDir: beadsDir,
 		legacy:   false,
@@ -150,6 +153,7 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	}
 
 	identities := m.identityVariants()
+	assignees := m.assigneeVariants()
 
 	if err := beads.EnsureCustomTypes(beadsDir); err != nil {
 		return nil, fmt.Errorf("ensuring custom types: %w", err)
@@ -174,7 +178,7 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		assignee.messages, assignee.err = m.queryIssueMessagesByAssignee(beadsDir, identities)
+		assignee.messages, assignee.err = m.queryIssueMessagesByAssignee(beadsDir, assignees)
 	}()
 	go func() {
 		defer wg.Done()
@@ -182,7 +186,7 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		wisps.messages, wisps.err = m.queryWispMessages(beadsDir, identities)
+		wisps.messages, wisps.err = m.queryWispMessages(beadsDir, assignees)
 	}()
 	wg.Wait()
 
@@ -436,6 +440,17 @@ func (m *Mailbox) identityVariants() []string {
 		variants = append(variants, "deacon")
 	}
 
+	return variants
+}
+
+// assigneeVariants returns identityVariants plus the qualified worker identity
+// that mail to this polecat or crew mailbox is assigned to (gs-7cz). CC labels
+// keep the routing identity, so CC lookups use identityVariants alone.
+func (m *Mailbox) assigneeVariants() []string {
+	variants := m.identityVariants()
+	if m.owner != "" && m.owner != m.identity {
+		variants = append(variants, m.owner)
+	}
 	return variants
 }
 
