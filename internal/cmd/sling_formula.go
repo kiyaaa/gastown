@@ -443,8 +443,18 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		return fmt.Errorf("dog formula reuse became stale before hook verification; retry dispatch")
 	}
 	if existing != nil && !slingForce && delayedDogInfo != nil && delayedDogInfo.ownsWork {
-		if err := cleanupStaleDogFormulaWispFn(existing.ID, formulaWorkDir); err != nil {
-			return fmt.Errorf("cleaning stale dog formula wisp %s: %w", existing.ID, err)
+		replaced, err := replaceStaleDogFormulaHook(existing, delayedDogInfo, formulaWorkDir)
+		if err != nil {
+			return err
+		}
+		if !replaced {
+			// The dog's session is still executing the existing hook (its kennel
+			// state was cleared underneath it). Keep the fresh assignment so the
+			// pool treats the dog as busy, and leave the remaining steps runnable.
+			fmt.Printf("%s Formula %s still running on %s via %s (session live), no-op\n",
+				style.Dim.Render("○"), formulaName, targetAgent, existing.ID)
+			delayedDogComplete = true
+			return nil
 		}
 	}
 	if admission == nil && strings.Contains(targetAgent, "/polecats/") {
