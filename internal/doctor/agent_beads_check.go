@@ -430,9 +430,15 @@ func migrateTownOnlyAgentBead(rigBd *beads.Beads, workDir, id string) error {
 	if err != nil {
 		return fmt.Errorf("migrating town-only %s to its rig database: %w", id, err)
 	}
-	if migrated {
-		_ = addWispLabelSQL(workDir, id, "gt:agent")
+	if !migrated {
+		// Nothing moved: fine if the rig copy appeared meanwhile, otherwise
+		// the rig home could not be resolved and the bead is still town-only.
+		if _, showErr := rigBd.ShowAgentBeadAtHome(id); showErr != nil {
+			return fmt.Errorf("could not migrate town-only %s: no rig-local copy after migration: %w", id, showErr)
+		}
+		return nil
 	}
+	_ = addWispLabelSQL(workDir, id, "gt:agent")
 	return nil
 }
 

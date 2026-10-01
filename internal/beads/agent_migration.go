@@ -70,8 +70,11 @@ func (b *Beads) RetireLegacyAgentBeadShadow(id string) (bool, error) {
 // migrateLegacyAgentBead implements MigrateLegacyAgentBead on a wrapper that
 // is already bound to the rig home of id.
 func (b *Beads) migrateLegacyAgentBead(id string) (bool, error) {
+	// Only a definite "not found" in the rig home triggers a migration. Any
+	// other lookup error leaves the operation to run (and report its own
+	// error) against the home, exactly as without a legacy copy.
 	if _, err := b.Show(id); err == nil || !errors.Is(err, ErrNotFound) {
-		return false, err
+		return false, nil
 	}
 	legacy := b.townAgentBeadWrapper()
 	if legacy == nil {
