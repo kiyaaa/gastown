@@ -45,6 +45,11 @@ the agent's scope.
 | Polecats | Rig | `<rig>/.beads/` | `<prefix>-<rig>-polecat-<name>` |
 | Crew | Rig | `<rig>/.beads/` | `<prefix>-<rig>-crew-<name>` |
 
+Older towns may still hold legacy copies of rig-scoped agent beads in
+`~/gt/.beads/`. The rig copy always wins. A legacy town-only copy is migrated
+into the rig (title, fields, labels and status preserved) by `gt doctor --fix`
+or on the first write to it, and the town copy is then closed.
+
 ### Role Beads
 
 Role beads are global templates stored in town beads with `hq-` prefix:

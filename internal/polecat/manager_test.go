@@ -2451,7 +2451,9 @@ esac
 	}
 }
 
-func TestManagerAgentLifecycleUsesTownBeadsDir(t *testing.T) {
+// Polecat spawn and nuke-reset operate on the agent bead in the owning rig
+// database (gs-8hj), the same copy gt polecat list and capacity read.
+func TestManagerAgentLifecycleUsesRigBeadsDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")
 	}
@@ -2485,8 +2487,10 @@ func TestManagerAgentLifecycleUsesTownBeadsDir(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
-		t.Fatalf("write types sentinel: %v", err)
+	for _, dir := range []string{townBeadsDir, rigBeadsDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+			t.Fatalf("write types sentinel: %v", err)
+		}
 	}
 
 	binDir := t.TempDir()
@@ -2522,7 +2526,7 @@ case "$cmd" in
     exit 0
     ;;
 esac
-`, logPath, townBeadsDir)
+`, logPath, rigBeadsDir)
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
 		t.Fatalf("write mock bd: %v", err)
 	}
@@ -2542,14 +2546,13 @@ esac
 		t.Fatalf("read mock log: %v", err)
 	}
 	logOutput := string(logBytes)
-	if strings.Contains(logOutput, "env="+rigBeadsDir) {
-		t.Fatalf("manager agent lifecycle used rig BEADS_DIR; log:\n%s", logOutput)
+	if strings.Contains(logOutput, "env="+townBeadsDir+" ") {
+		t.Fatalf("manager agent lifecycle used town BEADS_DIR; log:\n%s", logOutput)
 	}
-	if !strings.Contains(logOutput, "env="+townBeadsDir+" args=") || !strings.Contains(logOutput, "args=create") {
-		t.Fatalf("manager create did not use town BEADS_DIR; log:\n%s", logOutput)
-	}
-	if !strings.Contains(logOutput, "env="+townBeadsDir+" args=") || !strings.Contains(logOutput, "args=show") || !strings.Contains(logOutput, "args=update") {
-		t.Fatalf("manager reset did not use town BEADS_DIR for show/update; log:\n%s", logOutput)
+	for _, want := range []string{"args=create", "args=show", "args=update"} {
+		if !strings.Contains(logOutput, "env="+rigBeadsDir+" "+want) {
+			t.Fatalf("manager agent lifecycle did not run %s in the rig BEADS_DIR; log:\n%s", want, logOutput)
+		}
 	}
 }
 

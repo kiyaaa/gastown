@@ -354,6 +354,10 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
 }
 
+// agentBeads returns the wrapper for polecat agent bead operations. Agent
+// operations re-target each bead to its canonical home, the owning rig
+// database (see beads/agent_locality.go), which is also where gt polecat list
+// and scheduler capacity read polecat beads.
 func (m *Manager) agentBeads() *beads.Beads {
 	return m.beads.ForAgentBead()
 }
@@ -1929,7 +1933,6 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// The column stays stale (e.g., "idle" from previous gt done) until
 	// StartSession sets it to "working". Without this, the column and
 	// description diverge, causing dashboards to show incorrect state.
-	// Agent beads live in town DB — bypass prefix routing.
 	if err := m.agentBeads().UpdateAgentState(agentID, "spawning"); err != nil {
 		style.PrintWarning("could not sync agent_state column to spawning: %v", err)
 	}
@@ -2566,8 +2569,6 @@ func (m *Manager) Get(name string) (*Polecat, error) {
 // Valid states: "spawning", "working", "done", "stuck", "idle"
 func (m *Manager) SetAgentState(name string, state string) error {
 	agentID := m.agentBeadID(name)
-	// Agent beads live in the town DB — bypass prefix routing that would
-	// otherwise misroute "za-*" / "my-*" agent IDs to a rig DB.
 	return m.agentBeads().UpdateAgentState(agentID, state)
 }
 

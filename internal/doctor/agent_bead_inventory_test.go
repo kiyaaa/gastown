@@ -27,12 +27,12 @@ func TestAgentBeadInventoryLookup(t *testing.T) {
 		want      agentBeadPresence
 		wantIssue bool
 	}{
-		{"gs-gastown-witness", agentBeadTownOnly, true},     // rig-scoped, town copy only
-		{"gs-gastown-crew-max", agentBeadTownOnly, false},   // rig-scoped, town wisp only
-		{"gs-gastown-refinery", agentBeadPresent, true},     // duplicate: rig copy wins
+		{"gs-gastown-witness", agentBeadTownOnly, true},      // rig-scoped, town copy only
+		{"gs-gastown-crew-max", agentBeadTownOnly, false},    // rig-scoped, town wisp only
+		{"gs-gastown-refinery", agentBeadPresent, true},      // duplicate: rig copy wins
 		{"gs-gastown-polecat-rust", agentBeadTownOnly, true}, // polecats are rig-local (gs-8hj)
 		{"gs-gastown-polecat-fury", agentBeadPresent, true},  // duplicate: rig copy wins
-		{"hq-mayor", agentBeadPresent, true},                // town role stays in hq
+		{"hq-mayor", agentBeadPresent, true},                 // town role stays in hq
 		{"gs-gastown-crew-nobody", agentBeadMissing, false},
 	}
 	for _, tt := range tests {

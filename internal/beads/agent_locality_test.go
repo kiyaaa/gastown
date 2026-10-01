@@ -527,3 +527,46 @@ func TestAgentBeadHomeDir(t *testing.T) {
 		t.Errorf("RigAgentBeadsDir(zz) = %s, want town %s", got, lt.townBeads)
 	}
 }
+
+// gt polecat list, scheduler capacity, and polecat identity list read polecat
+// beads with beads.New(<rig path>).ListAgentBeads(), where <rig path> holds a
+// .beads redirect to mayor/rig/.beads. Every lifecycle write must resolve to
+// that same database, so list/capacity see what create/done/post-merge wrote
+// without manual copies (gs-8hj).
+func TestPolecatLifecycleWritesTheDatabaseRigListingsRead(t *testing.T) {
+	lt := newLocalityTown(t)
+	rigPath := filepath.Join(lt.root, "gastown")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	lt.agentRecord = polecatRecord
+	lt.installMockBD(t, []string{lt.rigBeads}, false)
+
+	const id = "gt-gastown-polecat-rust"
+	_, _ = New(rigPath).ListAgentBeads() // only the database it queries matters
+	listDirs := lt.commandDirs(t, "list")
+	if len(listDirs) == 0 {
+		t.Fatalf("ListAgentBeads issued no bd list; log:\n%s", lt.log(t))
+	}
+
+	town := New(lt.root).ForAgentBead()
+	if _, err := town.CreateOrReopenAgentBead(id, id, &AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "spawning"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if err := town.UpdateAgentCompletion(id, &CompletionMetadata{ExitType: "COMPLETED", MRID: "gt-mr-1"}); err != nil {
+		t.Fatalf("done completion: %v", err)
+	}
+	if _, err := New(lt.rigDir).ForAgentBeadID(id).ClearAgentActiveMRIfMatches(id, "gt-mr-1"); err != nil {
+		t.Fatalf("post-merge clear: %v", err)
+	}
+
+	listDir := listDirs[0]
+	assertAllDirs(t, "list", listDirs, listDir)
+	assertAllDirs(t, "update", lt.commandDirs(t, "update"), listDir)
+	if listDir != lt.rigBeads || AgentBeadHomeDir(lt.root, id) != listDir {
+		t.Fatalf("rig listing reads %s but the polecat home is %s", listDir, AgentBeadHomeDir(lt.root, id))
+	}
+}
