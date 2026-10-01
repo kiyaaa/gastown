@@ -76,59 +76,35 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var missing []string
 	var missingLabel []string
+	var misplaced []string
 	var checked int
 
-	// Build combined sets of known agent beads from both issues and wisps tables.
-	// Agent beads are ephemeral (stored in wisps), but we also check issues for
-	// backward compatibility. The wisps list doesn't include type/labels, so we
-	// track wisp IDs separately for existence checks.
-	allAgentBeads := make(map[string]*beads.Issue) // from issues table (has labels)
-	allWispIDs := make(map[string]bool)            // from wisps table (ID only)
-
-	// Load global agents from town beads
+	// Keep town and rig agent beads apart so a rig-scoped bead (witness,
+	// refinery, crew) found only in town is reported as misplaced rather than
+	// counted as present (gs-ftg).
+	inv := newAgentBeadInventory()
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townBd := beads.New(townBeadsPath)
-	if townAgents, err := townBd.ListAgentBeads(); err == nil {
-		for id, issue := range townAgents {
-			allAgentBeads[id] = issue
-		}
-	}
-	if townWisps, _ := townBd.ListWispIDs(); townWisps != nil {
-		for id := range townWisps {
-			allWispIDs[id] = true
-		}
-	}
-
-	// Load rig-level agents
+	inv.addTown(beads.New(townBeadsPath))
 	for _, info := range prefixToRig {
-		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		bd := beads.New(rigBeadsPath)
-		if rigAgents, err := bd.ListAgentBeads(); err == nil {
-			for id, issue := range rigAgents {
-				allAgentBeads[id] = issue
-			}
-		}
-		if rigWisps, _ := bd.ListWispIDs(); rigWisps != nil {
-			for id := range rigWisps {
-				allWispIDs[id] = true
-			}
-		}
+		inv.addRig(beads.New(filepath.Join(ctx.TownRoot, info.beadsPath)))
 	}
 
-	// checkAgentBead verifies an agent bead exists (in issues or wisps table).
+	// checkAgentBead verifies an agent bead exists in its home database.
 	// Label checking only applies to beads found in the issues table (wisps
 	// don't expose labels in their list output).
 	checkAgentBead := func(id string) {
-		if issue, exists := allAgentBeads[id]; exists {
-			// Found in issues table — check label
-			if !beads.HasLabel(issue, "gt:agent") {
-				missingLabel = append(missingLabel, id)
-			}
-		} else if !allWispIDs[id] {
-			// Not in issues or wisps
-			missing = append(missing, id)
-		}
 		checked++
+		presence, issue := inv.lookup(id)
+		switch presence {
+		case agentBeadMissing:
+			missing = append(missing, id)
+			return
+		case agentBeadTownOnly:
+			misplaced = append(misplaced, id)
+		}
+		if issue != nil && !beads.HasLabel(issue, "gt:agent") {
+			missingLabel = append(missingLabel, id)
+		}
 	}
 
 	// Check global agents (Mayor, Deacon)
@@ -183,14 +159,12 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(missing) == 0 && len(missingLabel) == 0 {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: fmt.Sprintf("All %d agent beads exist with gt:agent label", checked),
-		}
-	}
+	return c.result(checked, missing, misplaced, missingLabel)
+}
 
+// result builds the check result: missing beads are errors; misplaced
+// (town-only rig-scoped) beads and missing labels are fixable warnings.
+func (c *AgentBeadsCheck) result(checked int, missing, misplaced, missingLabel []string) *CheckResult {
 	if len(missing) > 0 {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -201,12 +175,32 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	var problems []string
+	var details []string
+	if len(misplaced) > 0 {
+		problems = append(problems, fmt.Sprintf("%d rig agent bead(s) only in town beads", len(misplaced)))
+		for _, id := range misplaced {
+			details = append(details, id+" (town-only; rig-local copy missing)")
+		}
+	}
+	if len(missingLabel) > 0 {
+		problems = append(problems, fmt.Sprintf("%d agent bead(s) missing gt:agent label", len(missingLabel)))
+		details = append(details, missingLabel...)
+	}
+	if len(problems) == 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: fmt.Sprintf("All %d agent beads exist with gt:agent label", checked),
+		}
+	}
+
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d agent bead(s) missing gt:agent label", len(missingLabel)),
-		Details: missingLabel,
-		FixHint: "Run 'gt doctor --fix' to add missing labels",
+		Message: strings.Join(problems, ", "),
+		Details: details,
+		FixHint: "Run 'gt doctor --fix' to create rig-local agent beads and add missing labels",
 	}
 }
 
@@ -214,8 +208,9 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// Pre-load all known agent bead IDs (from both issues and wisps tables)
 	// so we can check existence without per-bead Show() calls that miss ephemeral wisps.
-	allAgentBeads := make(map[string]*beads.Issue) // from issues table
-	allWispIDs := make(map[string]bool)            // from wisps table
+	// Town and rig beads are kept apart so town-only rig-scoped beads can be
+	// repaired in their owning rig database (gs-ftg).
+	inv := newAgentBeadInventory()
 
 	// Collect errors instead of failing on first — one broken rig shouldn't
 	// block fixes for all other rigs.
@@ -226,30 +221,28 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	townBd := beads.New(townBeadsPath)
 
 	// Load existing town agent beads
-	if townAgents, err := townBd.ListAgentBeads(); err == nil {
-		for id, issue := range townAgents {
-			allAgentBeads[id] = issue
-		}
-	}
-	if townWisps, _ := townBd.ListWispIDs(); townWisps != nil {
-		for id := range townWisps {
-			allWispIDs[id] = true
-		}
-	}
+	inv.addTown(townBd)
 
 	// fixAgentBead ensures an agent bead exists and is open.
 	// Logic:
 	//   1. If in issues table → ensure gt:agent label
 	//   2. If in wisps table (open) → ensure gt:agent label
-	//   3. If exists but closed → REOPEN it (don't recreate)
-	//   4. If truly missing → CREATE it
+	//   3. If a rig-scoped bead exists only in town → CREATE the rig-local
+	//      copy carrying the town copy's fields; the town copy is left as-is
+	//   4. If exists but closed → REOPEN it (don't recreate)
+	//   5. If truly missing → CREATE it
 	// Uses CreateAgentBead which creates durable agent beads (not wisps)
 	// so they survive wisp GC (GH#2768).
 	// workDir is the rig directory for direct SQL fallback when bd update
 	// fails silently (e.g., legacy prefixes that can't be routed — GH#2127).
 	fixAgentBead := func(bd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
+		presence, issue := inv.lookup(id)
+		if presence == agentBeadTownOnly {
+			return createRigLocalAgentBeadFromTown(bd, townBd, workDir, id, desc, fields)
+		}
+
 		// Check issues table first
-		if issue, exists := allAgentBeads[id]; exists {
+		if presence == agentBeadPresent && issue != nil {
 			// In issues table — ensure it has the gt:agent label.
 			if !beads.HasLabel(issue, "gt:agent") {
 				// Try bd update first (works for well-routed beads).
@@ -274,7 +267,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		}
 
 		// Check wisps table (only open wisps are listed)
-		if allWispIDs[id] {
+		if presence == agentBeadPresent {
 			// Exists as open wisp — ensure it has gt:agent label
 			// (ListWispIDs doesn't return labels, so we need to check)
 			if issue, err := bd.Show(id); err == nil && issue != nil {
@@ -359,18 +352,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 
 	// Load existing rig-level agent beads and wisp IDs before fixing
 	for _, info := range prefixToRig {
-		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		bd := beads.New(rigBeadsPath)
-		if rigAgents, err := bd.ListAgentBeads(); err == nil {
-			for id, issue := range rigAgents {
-				allAgentBeads[id] = issue
-			}
-		}
-		if rigWisps, _ := bd.ListWispIDs(); rigWisps != nil {
-			for id := range rigWisps {
-				allWispIDs[id] = true
-			}
-		}
+		inv.addRig(beads.New(filepath.Join(ctx.TownRoot, info.beadsPath)))
 	}
 
 	// Fix agents for each rig
@@ -419,6 +401,37 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// createRigLocalAgentBeadFromTown repairs a rig-scoped agent bead (witness,
+// refinery, crew) that exists only in the town database by creating its copy
+// in the owning rig database (rigBd's agent-bead home). Title and agent fields
+// are carried over from the town copy when it can be read, so lifecycle state
+// is preserved. The town copy is never modified or deleted: resolvers prefer
+// the rig-local bead, and leaving the legacy copy avoids mutating data the
+// operator has not reviewed.
+func createRigLocalAgentBeadFromTown(rigBd, townBd *beads.Beads, workDir, id, desc string, fields *beads.AgentFields) error {
+	title := desc
+	if townIssue, err := townBd.ForAgentBead().Show(id); err == nil && townIssue != nil {
+		townFields := beads.ParseAgentFields(townIssue.Description)
+		townFields.AgentState = beads.ResolveAgentState(townIssue.Description, townIssue.AgentState)
+		if townFields.RoleType == "" {
+			townFields.RoleType = fields.RoleType
+		}
+		if townFields.Rig == "" {
+			townFields.Rig = fields.Rig
+		}
+		fields = townFields
+		if townIssue.Title != "" {
+			title = townIssue.Title
+		}
+	}
+
+	if _, err := rigBd.CreateAgentBead(id, title, fields); err != nil {
+		return fmt.Errorf("creating rig-local %s (town-only copy exists): %w", id, err)
+	}
+	_ = addWispLabelSQL(workDir, id, "gt:agent")
+	return nil
 }
 
 // listCrewWorkers returns the names of canonical crew workers in a rig.

@@ -2452,7 +2452,9 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	if id == "" {
 		return
 	}
-	if issue, err := bd.Show(id); err == nil && issue != nil && issue.Status != string(beads.StatusClosed) {
+	// Check the canonical home only: a witness/refinery bead that exists solely
+	// as a legacy town copy must be recreated in its owning rig database.
+	if issue, err := bd.ShowAgentBeadAtHome(id); err == nil && issue != nil && issue.Status != string(beads.StatusClosed) {
 		return // exists and is active
 	}
 

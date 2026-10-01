@@ -558,12 +558,22 @@ type Beads struct {
 	townRootOnce sync.Once
 
 	// noRoute disables prefix-based routing for this Beads instance.
-	// Used for agent-bead operations: agent beads (gt:agent label) live in
-	// the town database regardless of their ID prefix, so prefix routing
-	// (which assumes "za-*" → zack DB) misroutes them. When set, Show()
+	// Used for agent-bead operations: polecat and town-role agent beads
+	// (gt:agent label) live in the town database regardless of their ID
+	// prefix, so prefix routing (which assumes "za-*" → zack DB) misroutes
+	// them. When set, Show()
 	// and forIssueID() skip ResolveRoutingTarget and operate against
 	// beadsDir directly.
 	noRoute bool
+
+	// agentTargetResolved marks a wrapper already bound to the home database
+	// of the agent bead being operated on (see agent_locality.go), so agent
+	// operations must not re-target it.
+	agentTargetResolved bool
+
+	// rigAgentHome marks a resolved wrapper bound to a rig database for a
+	// rig-scoped agent bead (witness, refinery, crew).
+	rigAgentHome bool
 }
 
 // New creates a new Beads wrapper for the given directory.
@@ -594,7 +604,11 @@ func NewWithBeadsDir(workDir, beadsDir string) *Beads {
 
 // ForAgentBead returns a Beads wrapper suitable for operating on agent beads.
 //
-// Agent beads (labeled gt:agent) live in the TOWN database, but their IDs
+// Agent operations on rig-scoped roles (witness, refinery, crew) issued
+// through this wrapper are still re-targeted to the owning rig database; see
+// agent_locality.go.
+//
+// Polecat and town-role agent beads (labeled gt:agent) live in the TOWN database, but their IDs
 // are prefixed with the rig prefix (e.g. "za-zack-polecat-furiosa"). The
 // default prefix routing in routes.jsonl maps "za-" → zack rig database, so
 // any agent-bead operation issued from a rig context (or any context that
