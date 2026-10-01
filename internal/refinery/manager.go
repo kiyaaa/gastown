@@ -763,7 +763,7 @@ func (m *Manager) PostMergeMR(mr *MergeRequest) (*PostMergeResult, error) {
 }
 
 func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResult, error) {
-	workBeadID := resolveMergedWorkBead(b.ForAgentBead(), mergedWorkBeadCloseRequest{
+	workBeadID := resolveMergedWorkBead(b.ForAgentBeadID(mr.AgentBead), mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Branch:      mr.Branch,
 		SourceIssue: mr.IssueID,

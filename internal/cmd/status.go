@@ -687,10 +687,17 @@ func gatherStatus() (TownStatus, error) {
 	allHookBeads := make(map[string]*beads.Issue)
 	var beadsMu sync.Mutex // Protects allAgentBeads and allHookBeads
 
-	// Helper to safely merge beads into the shared maps
-	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
+	// Helper to safely merge beads into the shared maps. Town and rig
+	// listings run concurrently; for rig-scoped agent beads the rig-local copy
+	// is canonical, so a legacy town duplicate never overrides it (gs-8hj).
+	mergeAgentBeads := func(beadsMap map[string]*beads.Issue, fromTown bool) {
 		beadsMu.Lock()
 		for id, issue := range beadsMap {
+			if fromTown && beads.IsRigLocalAgentBeadID(id) {
+				if _, exists := allAgentBeads[id]; exists {
+					continue
+				}
+			}
 			allAgentBeads[id] = issue
 		}
 		beadsMu.Unlock()
@@ -713,7 +720,7 @@ func gatherStatus() (TownStatus, error) {
 			defer beadsWg.Done()
 			townBeadsClient := beads.New(townBeadsPath)
 			townAgentBeads, _ := townBeadsClient.ListAgentBeads()
-			mergeAgentBeads(townAgentBeads)
+			mergeAgentBeads(townAgentBeads, true)
 
 			// Fetch hook beads from town beads
 			var townHookIDs []string
@@ -746,7 +753,7 @@ func gatherStatus() (TownStatus, error) {
 				if rigAgentBeads == nil {
 					return
 				}
-				mergeAgentBeads(rigAgentBeads)
+				mergeAgentBeads(rigAgentBeads, false)
 
 				var hookIDs []string
 				for _, issue := range rigAgentBeads {

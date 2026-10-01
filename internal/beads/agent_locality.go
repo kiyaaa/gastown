@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Agent bead locality policy (gs-ftg, gs-8hj, hq-ou3, hq-6cp).
@@ -142,9 +143,7 @@ func (b *Beads) rigAgentBeadHome(id string) *Beads {
 	townRoot := b.getTownRoot()
 	homeDir := ""
 	if townRoot != "" {
-		if rigPath := GetRigPathForPrefix(townRoot, ExtractPrefix(id)); rigPath != "" {
-			homeDir = ResolveBeadsDir(rigPath)
-		}
+		homeDir = routedRigBeadsDir(townRoot, ExtractPrefix(id))
 	}
 	if !dirExists(homeDir) {
 		// No usable route for the prefix (e.g. during rig bootstrap, a rig
@@ -174,6 +173,40 @@ func (b *Beads) rigAgentBeadHome(id string) *Beads {
 	}
 	home.townRootOnce.Do(func() {})
 	return home
+}
+
+// AgentBeadHomeDir returns the canonical home beads directory of agent bead
+// id for callers that run bd directly instead of going through a Beads
+// wrapper: the owning rig's beads directory for rig-scoped roles, the town
+// beads directory otherwise (or when the rig cannot be resolved).
+func AgentBeadHomeDir(townRoot, id string) string {
+	if IsRigLocalAgentBeadID(id) {
+		if dir := routedRigBeadsDir(townRoot, ExtractPrefix(id)); dirExists(dir) {
+			return dir
+		}
+	}
+	return GetTownBeadsPath(townRoot)
+}
+
+// RigAgentBeadsDir returns the beads directory holding the rig-scoped agent
+// beads (including polecats) of the rig whose bead prefix is prefix (without
+// the trailing hyphen), falling back to the town beads directory when the
+// prefix has no usable route.
+func RigAgentBeadsDir(townRoot, prefix string) string {
+	if dir := routedRigBeadsDir(townRoot, strings.TrimSuffix(prefix, "-")+"-"); dirExists(dir) {
+		return dir
+	}
+	return GetTownBeadsPath(townRoot)
+}
+
+// routedRigBeadsDir returns the beads directory routes.jsonl assigns to
+// prefix (with trailing hyphen), or "" when the prefix is unrouted.
+func routedRigBeadsDir(townRoot, prefix string) string {
+	rigPath := GetRigPathForPrefix(townRoot, prefix)
+	if rigPath == "" {
+		return ""
+	}
+	return ResolveBeadsDir(rigPath)
 }
 
 // townAgentBeadWrapper returns a resolved wrapper for the town database, or
