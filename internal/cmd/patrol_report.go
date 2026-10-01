@@ -111,17 +111,8 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	// Print the step audit for visibility
 	fmt.Println(stepAudit)
 
-	// Close all descendant wisps first (recursive), then the patrol root.
-	// Without this, every patrol cycle leaks ~10 orphan wisps into the DB.
-	// If descendants can't be closed, abort so patrol retries next cycle (gt-7lx3).
-	closed, closeDescErr := forceCloseDescendants(b, patrolID)
-	if closeDescErr != nil {
-		return fmt.Errorf("closing descendants of patrol %s (closed %d): %w", patrolID, closed, closeDescErr)
-	}
-
-	// Close the patrol root
-	if err := b.ForceCloseWithReason("patrol cycle complete: "+patrolReportSummary, patrolID); err != nil {
-		return fmt.Errorf("closing patrol %s: %w", patrolID, err)
+	if err := closePatrolCycle(b, patrolID, patrolReportSummary); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Closed patrol %s\n", style.Success.Render("✓"), patrolID)
@@ -140,6 +131,23 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Started new patrol: %s\n", style.Success.Render("✓"), newPatrolID)
 	if cfg.RoleName == "deacon" {
 		stampDeaconHeartbeatOnReport(cfg.BeadsDir, patrolReportSummary)
+	}
+	return nil
+}
+
+// closePatrolCycle closes all descendant wisps of the patrol (recursive), then
+// the patrol root. Without this, every patrol cycle leaks its poured step
+// wisps into the DB once the root is closed and garbage-collected (gs-rxy).
+// If descendants can't be closed, the root is left open so the patrol retries
+// next cycle (gt-7lx3).
+func closePatrolCycle(b *beads.Beads, patrolID, summary string) error {
+	closed, err := forceCloseDescendants(b, patrolID)
+	if err != nil {
+		return fmt.Errorf("closing descendants of patrol %s (closed %d): %w", patrolID, closed, err)
+	}
+
+	if err := b.ForceCloseWithReason("patrol cycle complete: "+summary, patrolID); err != nil {
+		return fmt.Errorf("closing patrol %s: %w", patrolID, err)
 	}
 	return nil
 }

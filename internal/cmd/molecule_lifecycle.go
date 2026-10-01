@@ -376,10 +376,10 @@ func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
 }
 
 func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, error) {
-	children, err := b.List(beads.ListOptions{
-		Parent: parentID,
-		Status: "all",
-	})
+	// Poured molecule steps live in the wisps table, and their priority comes
+	// from the formula. An issue-only, priority-0 listing misses them, so the
+	// root gets closed and GC'd while every step wisp leaks (gs-rxy).
+	children, err := listChildrenAcrossTables(b, parentID)
 	if err != nil {
 		return 0, fmt.Errorf("listing children of %s: %w", parentID, err)
 	}
