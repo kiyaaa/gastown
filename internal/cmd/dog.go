@@ -678,7 +678,7 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 	// Always close accumulated plugin mails, even if dog is already idle.
 	// Plugin dispatch mails accumulate across sessions and must be cleaned up
 	// regardless of current work state.
-	closePluginMails(name)
+	dogDoneCloseMails(name)
 
 	if d.State == dog.StateIdle && d.Work == "" {
 		fmt.Printf("Dog %s is already idle with no work\n", name)
@@ -691,6 +691,20 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("✓ Dog %s returned to kennel (idle)\n", name)
 
+	dogDoneTerminateSession(name)
+	return nil
+}
+
+// Side effects of runDogDone that reach outside the dog's state file.
+// Package-level so tests can exercise the clear-and-idle path without
+// touching mail or tmux.
+var (
+	dogDoneCloseMails       = closePluginMails
+	dogDoneTerminateSession = terminateDogSession
+)
+
+// terminateDogSession kills the dog's tmux session after a short delay.
+func terminateDogSession(name string) {
 	// Auto-terminate the tmux session after a short delay.
 	// Dogs run inside tmux sessions (hq-dog-<name>). Without this, the
 	// Claude agent idles at the prompt indefinitely after completing work,
@@ -717,8 +731,6 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 
 	// Wait for the goroutine to finish (the process will exit after kill).
 	time.Sleep(4 * time.Second)
-
-	return nil
 }
 
 func splitPathComponents(path string) []string {
