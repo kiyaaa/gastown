@@ -1403,7 +1403,7 @@ func (g *Git) AddUpstreamRemote(upstreamURL string) error {
 		return err
 	}
 	if has {
-		current, err := g.GetUpstreamURL()
+		current, err := g.RemoteURL("upstream")
 		if err != nil {
 			return err
 		}
@@ -1420,11 +1420,12 @@ func (g *Git) AddUpstreamRemote(upstreamURL string) error {
 // GetUpstreamURL returns the URL of the upstream remote.
 // Returns empty string if upstream remote doesn't exist.
 func (g *Git) GetUpstreamURL() (string, error) {
+	has, err := g.HasUpstreamRemote()
+	if err != nil || !has {
+		return "", err
+	}
 	out, err := g.run("remote", "get-url", "upstream")
 	if err != nil {
-		if strings.Contains(err.Error(), "No such remote") {
-			return "", nil
-		}
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
@@ -1432,14 +1433,24 @@ func (g *Git) GetUpstreamURL() (string, error) {
 
 // HasUpstreamRemote returns true if an upstream remote is configured.
 func (g *Git) HasUpstreamRemote() (bool, error) {
-	_, err := g.run("remote", "get-url", "upstream")
+	return g.hasRemote("upstream")
+}
+
+// hasRemote reports whether a remote with the given name is configured.
+// It checks the `git remote` listing instead of parsing the error from
+// `git remote get-url`: git localizes that message ("No such remote") and
+// its exit status differs across git versions.
+func (g *Git) hasRemote(name string) (bool, error) {
+	remotes, err := g.Remotes()
 	if err != nil {
-		if strings.Contains(err.Error(), "No such remote") {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	for _, r := range remotes {
+		if r == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // FetchUpstream fetches from the upstream remote.
