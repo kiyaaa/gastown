@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,26 +26,30 @@ var (
 
 // HealthReport is the machine-readable output of gt health --json.
 type HealthReport struct {
-	Timestamp string              `json:"timestamp"`
-	Server    *ServerHealth       `json:"server"`
-	Databases []DatabaseHealth    `json:"databases"`
-	Pollution []PollutionRecord   `json:"pollution,omitempty"`
-	Backups   *BackupHealth       `json:"backups"`
-	Processes *ProcessHealth      `json:"processes"`
-	Orphans   []OrphanDB          `json:"orphans,omitempty"`
+	Timestamp string           `json:"timestamp"`
+	Server    *ServerHealth    `json:"server"`
+	Databases []DatabaseHealth `json:"databases"`
+	// DatabasesError is set when the database list could not be enumerated
+	// from the Dolt server, so an empty Databases list is not mistaken for
+	// "no databases".
+	DatabasesError string            `json:"databases_error,omitempty"`
+	Pollution      []PollutionRecord `json:"pollution,omitempty"`
+	Backups        *BackupHealth     `json:"backups"`
+	Processes      *ProcessHealth    `json:"processes"`
+	Orphans        []OrphanDB        `json:"orphans,omitempty"`
 }
 
 type ServerHealth struct {
-	Running            bool    `json:"running"`
-	PID                int     `json:"pid,omitempty"`
-	Port               int     `json:"port,omitempty"`
-	LatencyMs          int64   `json:"latency_ms,omitempty"`
-	Connections        int     `json:"connections,omitempty"`
-	MaxConnections     int     `json:"max_connections,omitempty"`
-	DiskUsageBytes     int64   `json:"disk_usage_bytes,omitempty"`
-	DiskUsageHuman     string  `json:"disk_usage_human,omitempty"`
-	LastCommitAgeSec   float64 `json:"last_commit_age_seconds,omitempty"`
-	LastCommitDB       string  `json:"last_commit_db,omitempty"`
+	Running          bool    `json:"running"`
+	PID              int     `json:"pid,omitempty"`
+	Port             int     `json:"port,omitempty"`
+	LatencyMs        int64   `json:"latency_ms,omitempty"`
+	Connections      int     `json:"connections,omitempty"`
+	MaxConnections   int     `json:"max_connections,omitempty"`
+	DiskUsageBytes   int64   `json:"disk_usage_bytes,omitempty"`
+	DiskUsageHuman   string  `json:"disk_usage_human,omitempty"`
+	LastCommitAgeSec float64 `json:"last_commit_age_seconds,omitempty"`
+	LastCommitDB     string  `json:"last_commit_db,omitempty"`
 }
 
 type DatabaseHealth struct {
@@ -54,6 +59,9 @@ type DatabaseHealth struct {
 	Wisps      int    `json:"wisps"`
 	OpenWisps  int    `json:"open_wisps"`
 	Commits    int    `json:"commits"`
+	// Error is set when the database could not be opened or has no beads
+	// issues table, distinguishing it from a real (possibly empty) rig DB.
+	Error string `json:"error,omitempty"`
 }
 
 type PollutionRecord struct {
@@ -64,12 +72,12 @@ type PollutionRecord struct {
 }
 
 type BackupHealth struct {
-	DoltFreshness  string `json:"dolt_freshness,omitempty"`
-	DoltAgeSeconds int    `json:"dolt_age_seconds,omitempty"`
-	DoltStale      bool   `json:"dolt_stale"`
-	JSONLFreshness string `json:"jsonl_freshness,omitempty"`
-	JSONLAgeSeconds int   `json:"jsonl_age_seconds,omitempty"`
-	JSONLStale     bool   `json:"jsonl_stale"`
+	DoltFreshness   string `json:"dolt_freshness,omitempty"`
+	DoltAgeSeconds  int    `json:"dolt_age_seconds,omitempty"`
+	DoltStale       bool   `json:"dolt_stale"`
+	JSONLFreshness  string `json:"jsonl_freshness,omitempty"`
+	JSONLAgeSeconds int    `json:"jsonl_age_seconds,omitempty"`
+	JSONLStale      bool   `json:"jsonl_stale"`
 }
 
 type ProcessHealth struct {
@@ -118,13 +126,18 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	report.Server = checkServerHealth(townRoot)
 
 	// 2. Databases (only if server is running)
+	var dbNames []string
 	if report.Server.Running {
-		report.Databases = checkDatabaseHealth(report.Server.Port)
+		dbNames, err = discoverHealthDatabases(report.Server.Port)
+		if err != nil {
+			report.DatabasesError = err.Error()
+		}
+		report.Databases = checkDatabaseHealth(report.Server.Port, dbNames)
 	}
 
 	// 3. Pollution scan
 	if report.Server.Running {
-		report.Pollution = checkPollution(report.Server.Port)
+		report.Pollution = checkPollution(report.Server.Port, dbNames)
 	}
 
 	// 4. Backups
@@ -177,11 +190,78 @@ func checkServerHealth(townRoot string) *ServerHealth {
 	return sh
 }
 
-func checkDatabaseHealth(port int) []DatabaseHealth {
-	productionDBs := []string{"hq", "gt", "mo"}
+// listHealthDatabases enumerates the databases served by the Dolt server on
+// port. It is a variable so tests can substitute a fake server listing.
+var listHealthDatabases = listServerDatabases //nolint:gochecknoglobals // test seam
+
+// listServerDatabases runs SHOW DATABASES against the running Dolt server.
+// The server's catalog is authoritative: it is what bd actually connects to,
+// unlike the on-disk data directory which may hold phantom or unloaded DBs.
+func listServerDatabases(port int) ([]string, error) {
+	dsn := buildDoltDSN("root", port, "", dsnOpts{
+		Timeout:     "5s",
+		ReadTimeout: "10s",
+	})
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening Dolt connection: %w", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, fmt.Errorf("SHOW DATABASES: %w", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scanning SHOW DATABASES row: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading SHOW DATABASES rows: %w", err)
+	}
+	return names, nil
+}
+
+// discoverHealthDatabases returns the user databases on the Dolt server,
+// excluding system databases, in deterministic order.
+func discoverHealthDatabases(port int) ([]string, error) {
+	names, err := listHealthDatabases(port)
+	if err != nil {
+		return nil, err
+	}
+	return selectHealthDatabases(names), nil
+}
+
+// selectHealthDatabases drops system databases (information_schema, mysql,
+// dolt_cluster) and duplicates, and sorts the result so report ordering does
+// not depend on server enumeration order.
+func selectHealthDatabases(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	selected := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" || doltserver.IsSystemDatabase(name) || seen[name] {
+			continue
+		}
+		seen[name] = true
+		selected = append(selected, name)
+	}
+	sort.Strings(selected)
+	return selected
+}
+
+func checkDatabaseHealth(port int, dbNames []string) []DatabaseHealth {
 	var results []DatabaseHealth
 
-	for _, dbName := range productionDBs {
+	for _, dbName := range dbNames {
 		dh := DatabaseHealth{Name: dbName}
 
 		// wa-d6f: socket-first DSN (TCP fallback) to avoid TIME_WAIT churn
@@ -193,14 +273,18 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 		})
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
+			dh.Error = err.Error()
 			results = append(results, dh)
 			continue
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-		// Issue counts
-		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&dh.Issues)
+		// Issue counts. A failure here means the DB is unreachable or is not
+		// a beads database; record it so the report doesn't show phantom zeros.
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&dh.Issues); err != nil {
+			dh.Error = err.Error()
+		}
 		_ = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE status IN ('open','in_progress')").Scan(&dh.OpenIssues)
 
 		// Wisp counts
@@ -218,8 +302,7 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 	return results
 }
 
-func checkPollution(port int) []PollutionRecord {
-	productionDBs := []string{"hq", "gt", "mo"}
+func checkPollution(port int, dbNames []string) []PollutionRecord {
 	var records []PollutionRecord
 
 	// Known pollution patterns to check in the issues table.
@@ -236,7 +319,7 @@ func checkPollution(port int) []PollutionRecord {
 		{"id LIKE 'test%'", "test ID prefix"},
 	}
 
-	for _, dbName := range productionDBs {
+	for _, dbName := range dbNames {
 		// wa-d6f: socket-first DSN (TCP fallback) — same rationale as above.
 		dsn := buildDoltDSN("root", port, dbName, dsnOpts{
 			ParseTime:   true,
@@ -361,9 +444,17 @@ func printHealthReport(r *HealthReport) {
 	}
 
 	// 2. Databases
-	if len(r.Databases) > 0 {
+	if r.DatabasesError != "" {
+		fmt.Printf("\n%s Databases\n", style.Bold.Render("●"))
+		fmt.Printf("  %s Could not list databases: %s\n", style.Bold.Render("!"), r.DatabasesError)
+	} else if len(r.Databases) > 0 {
 		fmt.Printf("\n%s Databases\n", style.Bold.Render("●"))
 		for _, db := range r.Databases {
+			if db.Error != "" {
+				fmt.Printf("  %s: %s (%s)\n",
+					style.Bold.Render(db.Name), style.Bold.Render("unavailable"), db.Error)
+				continue
+			}
 			fmt.Printf("  %s: %d issues (%d open), %d wisps (%d open), %d commits\n",
 				style.Bold.Render(db.Name), db.Issues, db.OpenIssues,
 				db.Wisps, db.OpenWisps, db.Commits)
